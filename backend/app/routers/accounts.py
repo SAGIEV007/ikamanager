@@ -166,9 +166,24 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     return {"detail": "Account deleted"}
 
 
+class LoginRequest(BaseModel):
+    blackbox: str = ""
+    locale: str = "en-GB"
+    gf_lang: str = "en"
+
+
 @router.post("/{account_id}/login")
-async def login_account(account_id: int, db: AsyncSession = Depends(get_db)):
-    """Login to a specific Ikariam account."""
+async def login_account(
+    account_id: int,
+    login_data: Optional[LoginRequest] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Login to a specific Ikariam account.
+
+    The blackbox token must be provided from the client's browser. Without a
+    valid blackbox from a trusted environment, the Gameforge API will reject
+    the login (even with correct credentials).
+    """
     result = await db.execute(
         select(IkariamAccount).where(IkariamAccount.id == account_id)
     )
@@ -189,10 +204,21 @@ async def login_account(account_id: int, db: AsyncSession = Depends(get_db)):
     # Decrypt password
     password = decrypt_password(account.password_encrypted)
 
+    # Login parameters
+    blackbox = login_data.blackbox if login_data else ""
+    locale = login_data.locale if login_data else "en-GB"
+    gf_lang = login_data.gf_lang if login_data else "en"
+
     # Login
     login_service = IkariamLoginService(proxy_url=proxy_url)
     try:
-        result_data = await login_service.login(account.email, password)
+        result_data = await login_service.login(
+            email=account.email,
+            password=password,
+            locale=locale,
+            gf_lang=gf_lang,
+            blackbox=blackbox,
+        )
 
         # Update account status
         account.is_online = True
@@ -207,13 +233,21 @@ async def login_account(account_id: int, db: AsyncSession = Depends(get_db)):
             "status": "success",
             "message": f"Logged in successfully. Found {len(result_data['accounts'])} game accounts.",
             "game_accounts": result_data["accounts"],
+            "token": result_data.get("token"),
         }
     except GameforgeLoginError as e:
         account.status = "error"
         account.status_message = str(e)
         account.is_online = False
         await db.commit()
-        raise HTTPException(status_code=401, detail=str(e))
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "message": str(e),
+                "error_type": e.error_type,
+                "challenge_id": e.challenge_id,
+            },
+        )
     except Exception as e:
         account.status = "error"
         account.status_message = f"Connection error: {str(e)}"

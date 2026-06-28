@@ -1,14 +1,27 @@
 """Ikariam API endpoints and constants."""
 
-# Gameforge Lobby
+import uuid
+
+# Gameforge Spark API (authentication)
+SPARK_API_BASE = "https://spark-web.gameforge.com/api/v2"
+SPARK_LOGIN_MAUTH = f"{SPARK_API_BASE}/authProviders/mauth/sessions"
+SPARK_LOGIN_CREDENTIALS = f"{SPARK_API_BASE}/authProviders/credentials/sessions"
+
+# Challenge system
+CHALLENGE_BASE = "https://challenge.gameforge.com"
+
+# Gameforge Lobby (accounts/servers/login links)
 LOBBY_BASE = "https://lobby.ikariam.gameforge.com"
-LOBBY_LOGIN = f"{LOBBY_BASE}/api/users"
 LOBBY_ACCOUNTS = f"{LOBBY_BASE}/api/users/me/accounts"
 LOBBY_SERVERS = f"{LOBBY_BASE}/api/servers"
 LOBBY_LOGIN_LINK = f"{LOBBY_BASE}/api/users/me/loginLink"
 
-# Pixel Zirkus (cookie)
-PIXELZIRKUS_URL = "https://pixelzirkus.gameforge.com/do/simple"
+# Ikariam game IDs (from lobby React app config)
+IKARIAM_PLATFORM_GAME_ID = "07b3e4d5-f37e-440b-9aa5-b249121a6bfa"
+IKARIAM_GAME_ENVIRONMENT_ID = "5c71b04b-a0c3-4792-be4f-81f97c25d8a8"
+
+# Pixel Zirkus (analytics/tracking - optional)
+PIXELZIRKUS_URL = f"{LOBBY_BASE}/statichub/do2/simple"
 
 # Game server base (format with server domain)
 GAME_BASE = "https://s{server_number}-{language}.ikariam.gameforge.com"
@@ -50,3 +63,8 @@ LOBBY_HEADERS = {
     "Origin": "https://lobby.ikariam.gameforge.com",
     "Referer": "https://lobby.ikariam.gameforge.com/",
 }
+
+
+def generate_installation_id() -> str:
+    """Generate a unique installation ID for the session."""
+    return str(uuid.uuid4())
