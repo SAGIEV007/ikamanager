@@ -12,36 +12,22 @@ from app.models.account import IkariamAccount
 from app.models.proxy import Proxy
 from app.utils.crypto import encrypt_password, decrypt_password
 from app.services.ikariam.login import IkariamLoginService, GameforgeLoginError
+from app.services.ikariam.game_actions import GameActionService
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
 
 class AccountCreate(BaseModel):
-    nickname: str
     email: str
     password: str
-    server_country: str
-    server_world: str
-    server_number: Optional[int] = None
-    server_language: Optional[str] = None
+    nickname: str = ""
     group_name: str = "Default"
-    proxy_id: Optional[int] = None
-    delay_min: float = 2.0
-    delay_max: float = 6.0
-    max_requests_per_minute: int = 20
-    operation_start_hour: int = 6
-    operation_end_hour: int = 23
 
 
 class AccountUpdate(BaseModel):
     nickname: Optional[str] = None
     group_name: Optional[str] = None
     proxy_id: Optional[int] = None
-    delay_min: Optional[float] = None
-    delay_max: Optional[float] = None
-    max_requests_per_minute: Optional[int] = None
-    operation_start_hour: Optional[int] = None
-    operation_end_hour: Optional[int] = None
     is_active: Optional[bool] = None
 
 
@@ -101,25 +87,18 @@ async def get_account(account_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/", response_model=AccountResponse)
 async def create_account(data: AccountCreate, db: AsyncSession = Depends(get_db)):
-    """Add a new Ikariam account."""
-    # Encrypt the password before storing
+    """Add a new Ikariam account. Only email and password required."""
     encrypted_pw = encrypt_password(data.password)
 
+    nickname = data.nickname or data.email.split("@")[0]
+
     account = IkariamAccount(
-        nickname=data.nickname,
+        nickname=nickname,
         email=data.email,
         password_encrypted=encrypted_pw,
-        server_country=data.server_country,
-        server_world=data.server_world,
-        server_number=data.server_number,
-        server_language=data.server_language,
+        server_country="",
+        server_world="",
         group_name=data.group_name,
-        proxy_id=data.proxy_id,
-        delay_min=data.delay_min,
-        delay_max=data.delay_max,
-        max_requests_per_minute=data.max_requests_per_minute,
-        operation_start_hour=data.operation_start_hour,
-        operation_end_hour=data.operation_end_hour,
     )
 
     db.add(account)
@@ -168,8 +147,6 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
 
 class LoginRequest(BaseModel):
     blackbox: str = ""
-    locale: str = "en-GB"
-    gf_lang: str = "en"
 
 
 @router.post("/{account_id}/login")
@@ -178,12 +155,7 @@ async def login_account(
     login_data: Optional[LoginRequest] = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """Login to a specific Ikariam account.
-
-    The blackbox token must be provided from the client's browser. Without a
-    valid blackbox from a trusted environment, the Gameforge API will reject
-    the login (even with correct credentials).
-    """
+    """Login to Gameforge, auto-detect servers, and enter game world."""
     result = await db.execute(
         select(IkariamAccount).where(IkariamAccount.id == account_id)
     )
@@ -201,39 +173,52 @@ async def login_account(
         if proxy:
             proxy_url = proxy.url
 
-    # Decrypt password
     password = decrypt_password(account.password_encrypted)
-
-    # Login parameters
     blackbox = login_data.blackbox if login_data else ""
-    locale = login_data.locale if login_data else "en-GB"
-    gf_lang = login_data.gf_lang if login_data else "en"
 
-    # Login
     login_service = IkariamLoginService(proxy_url=proxy_url)
     try:
         result_data = await login_service.login(
             email=account.email,
             password=password,
-            locale=locale,
-            gf_lang=gf_lang,
             blackbox=blackbox,
         )
 
-        # Update account status
+        # Auto-detect server info from game accounts
+        game_accounts = result_data.get("accounts", [])
+        servers = result_data.get("servers", [])
+
+        # Update account with detected info
         account.is_online = True
         account.status = "online"
         account.last_login = datetime.utcnow()
-        account.status_message = f"Logged in. Found {len(result_data['accounts'])} game accounts."
+
+        if game_accounts:
+            first_account = game_accounts[0] if isinstance(game_accounts, list) else list(game_accounts.values())[0] if isinstance(game_accounts, dict) else None
+            if first_account:
+                # Extract server info from the game account
+                server_info = first_account.get("server", {})
+                account.server_language = server_info.get("language", "")
+                account.server_number = server_info.get("number", 0)
+                account.server_country = server_info.get("language", "").upper()
+                account.server_world = first_account.get("name", "")
+                if first_account.get("name"):
+                    account.nickname = first_account.get("name", account.nickname)
+
+        account.status_message = f"Online. {len(game_accounts)} mundo(s) detectado(s)."
+
+        # Store token for game actions
+        token = result_data.get("token", "")
+        account.session_cookie = token
 
         await db.commit()
         await db.refresh(account)
 
         return {
             "status": "success",
-            "message": f"Logged in successfully. Found {len(result_data['accounts'])} game accounts.",
-            "game_accounts": result_data["accounts"],
-            "token": result_data.get("token"),
+            "message": f"Login OK! {len(game_accounts)} mundo(s) encontrado(s).",
+            "game_accounts": game_accounts,
+            "servers": servers,
         }
     except GameforgeLoginError as e:
         account.status = "error"
@@ -250,10 +235,10 @@ async def login_account(
         )
     except Exception as e:
         account.status = "error"
-        account.status_message = f"Connection error: {str(e)}"
+        account.status_message = f"Erro: {str(e)}"
         account.is_online = False
         await db.commit()
-        raise HTTPException(status_code=500, detail=f"Connection error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro de conexao: {str(e)}")
     finally:
         await login_service.close()
 
@@ -277,13 +262,164 @@ async def logout_account(account_id: int, db: AsyncSession = Depends(get_db)):
     return {"detail": "Logged out"}
 
 
-@router.get("/{account_id}/cities")
-async def get_account_cities(account_id: int, db: AsyncSession = Depends(get_db)):
-    """Get cities for an account."""
-    from app.models.city import City
-
+@router.post("/{account_id}/enter-world")
+async def enter_world(
+    account_id: int,
+    login_data: Optional[LoginRequest] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Enter the game world and get city/building data."""
     result = await db.execute(
-        select(City).where(City.account_id == account_id)
+        select(IkariamAccount).where(IkariamAccount.id == account_id)
     )
-    cities = result.scalars().all()
-    return cities
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if not account.session_cookie:
+        raise HTTPException(status_code=400, detail="Account not logged in. Login first.")
+
+    blackbox = login_data.blackbox if login_data else ""
+
+    # Get proxy URL
+    proxy_url = None
+    if account.proxy_id:
+        proxy_result = await db.execute(
+            select(Proxy).where(Proxy.id == account.proxy_id)
+        )
+        proxy = proxy_result.scalar_one_or_none()
+        if proxy:
+            proxy_url = proxy.url
+
+    game_service = GameActionService(proxy_url=proxy_url)
+    try:
+        # Use stored token to get loginLink and enter world
+        login_service = IkariamLoginService(proxy_url=proxy_url)
+        await login_service.create_session()
+        login_service.auth_token = account.session_cookie
+
+        # Get accounts to find the right one
+        game_accounts = await login_service._get_accounts()
+
+        if not game_accounts:
+            raise HTTPException(status_code=400, detail="No game accounts found")
+
+        first_account = game_accounts[0] if isinstance(game_accounts, list) else list(game_accounts.values())[0]
+        account_gf_id = first_account.get("id", "")
+        server = first_account.get("server", {})
+
+        # Get login link
+        login_url = await login_service.get_login_link(
+            account_id=account_gf_id,
+            server_language=server.get("language", ""),
+            server_number=server.get("number", 1),
+            blackbox=blackbox,
+        )
+
+        # Enter the world
+        world_data = await login_service.login_to_world(login_url)
+
+        account.status_message = "In-game. World loaded."
+        account.last_action = datetime.utcnow()
+        await db.commit()
+
+        return {
+            "status": "success",
+            "login_url": login_url,
+            "cookies": world_data.get("cookies", {}),
+        }
+    except GameforgeLoginError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error entering world: {str(e)}")
+    finally:
+        await login_service.close()
+
+
+class DonateRequest(BaseModel):
+    city_id: int
+    resource_type: str = "wood"  # "wood" or luxury resource name
+    amount: int = 0  # 0 = donate all available
+
+
+class BuildRequest(BaseModel):
+    city_id: int
+    position: int  # building position (0-based)
+
+
+@router.post("/{account_id}/donate")
+async def donate_resources(
+    account_id: int,
+    data: DonateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Donate resources to the island."""
+    result = await db.execute(
+        select(IkariamAccount).where(IkariamAccount.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if not account.is_online:
+        raise HTTPException(status_code=400, detail="Account is not online. Login first.")
+
+    game_service = GameActionService(account=account, db=db)
+    try:
+        result_data = await game_service.donate(
+            city_id=data.city_id,
+            resource_type=data.resource_type,
+            amount=data.amount,
+        )
+        return result_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{account_id}/build")
+async def upgrade_building(
+    account_id: int,
+    data: BuildRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Upgrade a building at given position."""
+    result = await db.execute(
+        select(IkariamAccount).where(IkariamAccount.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if not account.is_online:
+        raise HTTPException(status_code=400, detail="Account is not online. Login first.")
+
+    game_service = GameActionService(account=account, db=db)
+    try:
+        result_data = await game_service.upgrade_building(
+            city_id=data.city_id,
+            position=data.position,
+        )
+        return result_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{account_id}/game-data")
+async def get_game_data(
+    account_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get current game data (cities, resources, buildings)."""
+    result = await db.execute(
+        select(IkariamAccount).where(IkariamAccount.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if not account.is_online:
+        raise HTTPException(status_code=400, detail="Account is not online. Login first.")
+
+    game_service = GameActionService(account=account, db=db)
+    try:
+        data = await game_service.get_full_game_data()
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, LogIn, LogOut, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, LogIn, LogOut, RefreshCw, Building2, TreePine } from 'lucide-react';
 import { useStore } from '../stores/useStore';
 import { accountsApi, proxiesApi } from '../services/api';
-import type { AccountCreate, Proxy } from '../services/api';
+import type { AccountCreate } from '../services/api';
 
 export function Accounts() {
-  const { accounts, setAccounts, proxies, setProxies } = useStore();
+  const { accounts, setAccounts, setProxies } = useStore();
   const [showAddForm, setShowAddForm] = useState(false);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   useEffect(() => {
     loadData();
@@ -31,26 +32,31 @@ export function Accounts() {
 
   const handleLogin = async (id: number) => {
     if (!window.__ikaBlackboxReady) {
-      alert('Blackbox token not ready yet. Please wait a few seconds and try again.');
+      alert('Token blackbox nao esta pronto. Aguarde alguns segundos e tente novamente.');
       return;
     }
     setActionLoading(id);
+    setActionMessage('Fazendo login na Gameforge...');
     try {
-      await accountsApi.login(id);
+      const res = await accountsApi.login(id);
+      setActionMessage(res.data.message || 'Login OK!');
       await loadData();
     } catch (err: any) {
       const detail = err.response?.data?.detail;
       if (typeof detail === 'object') {
         if (detail.error_type === 'CHALLENGE_REQUIRED') {
-          alert('Challenge required. The blackbox token was rejected. Try refreshing the page.');
+          alert('Challenge necessario. Token blackbox rejeitado. Tente recarregar a pagina.');
+        } else if (detail.error_type === 'CREDENTIALS_INVALID') {
+          alert('Email ou senha incorretos.');
         } else {
-          alert(detail.message || 'Login failed');
+          alert(detail.message || 'Login falhou');
         }
       } else {
-        alert(detail || 'Login failed');
+        alert(detail || 'Login falhou');
       }
     } finally {
       setActionLoading(null);
+      setTimeout(() => setActionMessage(null), 5000);
     }
   };
 
@@ -60,19 +66,47 @@ export function Accounts() {
       await accountsApi.logout(id);
       await loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Logout failed');
+      alert(err.response?.data?.detail || 'Logout falhou');
     } finally {
       setActionLoading(null);
     }
   };
 
   const handleDelete = async (id: number) => {
-    if (!confirm('Are you sure you want to delete this account?')) return;
+    if (!confirm('Tem certeza que deseja excluir esta conta?')) return;
     try {
       await accountsApi.delete(id);
       await loadData();
     } catch (err) {
-      alert('Failed to delete account');
+      alert('Falha ao excluir conta');
+    }
+  };
+
+  const handleDonate = async (id: number) => {
+    setActionLoading(id);
+    setActionMessage('Executando doacao...');
+    try {
+      const res = await accountsApi.donate(id, 0, 'wood', 0);
+      setActionMessage(res.data.message || 'Doacao realizada!');
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Falha na doacao. Faca login primeiro.');
+    } finally {
+      setActionLoading(null);
+      setTimeout(() => setActionMessage(null), 5000);
+    }
+  };
+
+  const handleBuild = async (id: number) => {
+    setActionLoading(id);
+    setActionMessage('Iniciando construcao...');
+    try {
+      const res = await accountsApi.build(id, 0, 0);
+      setActionMessage(res.data.message || 'Construcao iniciada!');
+    } catch (err: any) {
+      alert(err.response?.data?.detail || 'Falha na construcao. Faca login primeiro.');
+    } finally {
+      setActionLoading(null);
+      setTimeout(() => setActionMessage(null), 5000);
     }
   };
 
@@ -87,20 +121,26 @@ export function Accounts() {
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-slate-100">Accounts</h1>
+        <h1 className="text-2xl font-bold text-slate-100">Contas</h1>
         <button
           onClick={() => setShowAddForm(true)}
           className="flex items-center gap-2 bg-purple-700 hover:bg-purple-600 text-white px-4 py-2 rounded-lg text-sm transition"
         >
           <Plus className="w-4 h-4" />
-          Add Account
+          Adicionar Conta
         </button>
       </div>
+
+      {/* Status message */}
+      {actionMessage && (
+        <div className="mb-4 p-3 bg-blue-900/30 border border-blue-700/30 rounded-lg">
+          <p className="text-sm text-blue-300">{actionMessage}</p>
+        </div>
+      )}
 
       {/* Add Account Form */}
       {showAddForm && (
         <AddAccountForm
-          proxies={proxies}
           onClose={() => setShowAddForm(false)}
           onCreated={() => {
             setShowAddForm(false);
@@ -113,18 +153,16 @@ export function Accounts() {
       <div className="bg-[#16213e] rounded-xl border border-purple-900/30 overflow-hidden">
         {accounts.length === 0 ? (
           <div className="p-8 text-center text-slate-400">
-            <p>No accounts yet. Click "Add Account" to get started.</p>
+            <p>Nenhuma conta ainda. Clique em "Adicionar Conta" para comecar.</p>
           </div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr className="text-slate-400 border-b border-slate-700 bg-slate-800/30">
-                <th className="text-left py-3 px-4">Player</th>
-                <th className="text-left py-3 px-4">Server</th>
-                <th className="text-left py-3 px-4">Group</th>
+                <th className="text-left py-3 px-4">Jogador</th>
+                <th className="text-left py-3 px-4">Servidor</th>
                 <th className="text-left py-3 px-4">Status</th>
-                <th className="text-left py-3 px-4">Proxy</th>
-                <th className="text-right py-3 px-4">Actions</th>
+                <th className="text-right py-3 px-4">Acoes</th>
               </tr>
             </thead>
             <tbody>
@@ -137,30 +175,44 @@ export function Accounts() {
                     </div>
                   </td>
                   <td className="py-3 px-4 text-slate-400">
-                    {account.server_country} | {account.server_world}
+                    {account.server_world || account.server_country || 'Auto-detectar no login'}
                   </td>
-                  <td className="py-3 px-4 text-slate-400">{account.group_name}</td>
                   <td className="py-3 px-4">
                     <StatusBadge status={account.status} message={account.status_message} />
                   </td>
-                  <td className="py-3 px-4 text-slate-400 text-xs">
-                    {account.proxy_id ? `Proxy #${account.proxy_id}` : 'No proxy'}
-                  </td>
                   <td className="py-3 px-4">
-                    <div className="flex items-center justify-end gap-2">
+                    <div className="flex items-center justify-end gap-1">
                       {account.is_online ? (
-                        <button
-                          onClick={() => handleLogout(account.id)}
-                          disabled={actionLoading === account.id}
-                          className="p-1.5 rounded text-orange-400 hover:bg-orange-900/30 transition disabled:opacity-50"
-                          title="Logout"
-                        >
-                          {actionLoading === account.id ? (
-                            <RefreshCw className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <LogOut className="w-4 h-4" />
-                          )}
-                        </button>
+                        <>
+                          <button
+                            onClick={() => handleDonate(account.id)}
+                            disabled={actionLoading === account.id}
+                            className="p-1.5 rounded text-green-400 hover:bg-green-900/30 transition disabled:opacity-50"
+                            title="Doar recursos na ilha"
+                          >
+                            <TreePine className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleBuild(account.id)}
+                            disabled={actionLoading === account.id}
+                            className="p-1.5 rounded text-blue-400 hover:bg-blue-900/30 transition disabled:opacity-50"
+                            title="Melhorar edificio"
+                          >
+                            <Building2 className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleLogout(account.id)}
+                            disabled={actionLoading === account.id}
+                            className="p-1.5 rounded text-orange-400 hover:bg-orange-900/30 transition disabled:opacity-50"
+                            title="Logout"
+                          >
+                            {actionLoading === account.id ? (
+                              <RefreshCw className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <LogOut className="w-4 h-4" />
+                            )}
+                          </button>
+                        </>
                       ) : (
                         <button
                           onClick={() => handleLogin(account.id)}
@@ -178,7 +230,7 @@ export function Accounts() {
                       <button
                         onClick={() => handleDelete(account.id)}
                         className="p-1.5 rounded text-red-400 hover:bg-red-900/30 transition"
-                        title="Delete"
+                        title="Excluir"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -195,21 +247,16 @@ export function Accounts() {
 }
 
 function AddAccountForm({
-  proxies,
   onClose,
   onCreated,
 }: {
-  proxies: Proxy[];
   onClose: () => void;
   onCreated: () => void;
 }) {
   const [form, setForm] = useState<AccountCreate>({
-    nickname: '',
     email: '',
     password: '',
-    server_country: '',
-    server_world: '',
-    group_name: 'Default',
+    nickname: '',
   });
   const [submitting, setSubmitting] = useState(false);
 
@@ -220,7 +267,7 @@ function AddAccountForm({
       await accountsApi.create(form);
       onCreated();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to create account');
+      alert(err.response?.data?.detail || 'Falha ao criar conta');
     } finally {
       setSubmitting(false);
     }
@@ -228,60 +275,30 @@ function AddAccountForm({
 
   return (
     <div className="bg-[#16213e] rounded-xl border border-purple-900/30 p-6 mb-6">
-      <h2 className="text-lg font-semibold text-slate-200 mb-4">Add Account</h2>
-      <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <h2 className="text-lg font-semibold text-slate-200 mb-4">Adicionar Conta</h2>
+      <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Input
-          label="Nickname"
-          value={form.nickname}
-          onChange={(v) => setForm({ ...form, nickname: v })}
-          required
-        />
-        <Input
-          label="Email"
+          label="Email Gameforge"
           type="email"
           value={form.email}
           onChange={(v) => setForm({ ...form, email: v })}
+          placeholder="email@example.com"
           required
         />
         <Input
-          label="Password"
+          label="Senha"
           type="password"
           value={form.password}
           onChange={(v) => setForm({ ...form, password: v })}
+          placeholder="********"
           required
         />
         <Input
-          label="Country (e.g., BR, US, GB)"
-          value={form.server_country}
-          onChange={(v) => setForm({ ...form, server_country: v })}
-          required
+          label="Apelido (opcional)"
+          value={form.nickname || ''}
+          onChange={(v) => setForm({ ...form, nickname: v })}
+          placeholder="Detectado automaticamente no login"
         />
-        <Input
-          label="World (e.g., Alpha, Beta)"
-          value={form.server_world}
-          onChange={(v) => setForm({ ...form, server_world: v })}
-          required
-        />
-        <Input
-          label="Group"
-          value={form.group_name || ''}
-          onChange={(v) => setForm({ ...form, group_name: v })}
-        />
-        <div>
-          <label className="block text-xs text-slate-400 mb-1">Proxy</label>
-          <select
-            className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200"
-            value={form.proxy_id || ''}
-            onChange={(e) => setForm({ ...form, proxy_id: e.target.value ? Number(e.target.value) : undefined })}
-          >
-            <option value="">No proxy</option>
-            {proxies.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label || `${p.host}:${p.port}`} ({p.protocol})
-              </option>
-            ))}
-          </select>
-        </div>
 
         <div className="col-span-full flex justify-end gap-3 mt-2">
           <button
@@ -289,22 +306,21 @@ function AddAccountForm({
             onClick={onClose}
             className="px-4 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition"
           >
-            Cancel
+            Cancelar
           </button>
           <button
             type="submit"
             disabled={submitting}
             className="px-4 py-2 rounded-lg text-sm bg-purple-700 hover:bg-purple-600 text-white transition disabled:opacity-50"
           >
-            {submitting ? 'Adding...' : 'Add Account'}
+            {submitting ? 'Adicionando...' : 'Adicionar'}
           </button>
         </div>
       </form>
 
-      <div className="mt-4 p-3 bg-yellow-900/20 border border-yellow-700/30 rounded-lg">
-        <p className="text-xs text-yellow-400">
-          ⚠️ For your account security, use a dedicated proxy for each account. Never use the same
-          IP for two accounts in the same world.
+      <div className="mt-4 p-3 bg-slate-800/50 border border-slate-700/30 rounded-lg">
+        <p className="text-xs text-slate-400">
+          Apenas email e senha sao necessarios. O servidor e mundo serao detectados automaticamente quando voce fizer login.
         </p>
       </div>
     </div>
@@ -317,12 +333,14 @@ function Input({
   onChange,
   type = 'text',
   required = false,
+  placeholder = '',
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   type?: string;
   required?: boolean;
+  placeholder?: string;
 }) {
   return (
     <div>
@@ -332,7 +350,8 @@ function Input({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         required={required}
-        className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-purple-500 focus:outline-none"
+        placeholder={placeholder}
+        className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:border-purple-500 focus:outline-none placeholder-slate-600"
       />
     </div>
   );
@@ -343,7 +362,6 @@ function StatusBadge({ status, message }: { status: string; message: string | nu
     online: { bg: 'bg-green-900/40', text: 'text-green-400' },
     offline: { bg: 'bg-slate-700/40', text: 'text-slate-400' },
     error: { bg: 'bg-red-900/40', text: 'text-red-400' },
-    captcha: { bg: 'bg-yellow-900/40', text: 'text-yellow-400' },
   };
   const style = statusMap[status] || statusMap.offline;
 
@@ -352,7 +370,7 @@ function StatusBadge({ status, message }: { status: string; message: string | nu
       <span className={`px-2 py-0.5 rounded text-xs font-medium ${style.bg} ${style.text}`}>
         {status}
       </span>
-      {message && <p className="text-xs text-slate-500 mt-1 truncate max-w-[200px]">{message}</p>}
+      {message && <p className="text-xs text-slate-500 mt-1 truncate max-w-[250px]">{message}</p>}
     </div>
   );
 }
