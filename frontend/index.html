@@ -4,10 +4,20 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <title>IkaManager</title>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <!-- Gameforge blackbox token generator (browser fingerprint) -->
+    <script>
+      window.__ikaBlackbox = '';
+      window.__ikaBlackboxReady = false;
+      function handleToken(token) {
+        window.__ikaBlackbox = 'tra:' + token;
+        window.__ikaBlackboxReady = true;
+      }
+    </script>
+    <script src="https://gameforge.com/tra/game1.js" onload="game1(handleToken)"></script>
   </body>
 </html>

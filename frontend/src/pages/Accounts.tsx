@@ -30,12 +30,25 @@ export function Accounts() {
   };
 
   const handleLogin = async (id: number) => {
+    if (!window.__ikaBlackboxReady) {
+      alert('Blackbox token not ready yet. Please wait a few seconds and try again.');
+      return;
+    }
     setActionLoading(id);
     try {
       await accountsApi.login(id);
       await loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Login failed');
+      const detail = err.response?.data?.detail;
+      if (typeof detail === 'object') {
+        if (detail.error_type === 'CHALLENGE_REQUIRED') {
+          alert('Challenge required. The blackbox token was rejected. Try refreshing the page.');
+        } else {
+          alert(detail.message || 'Login failed');
+        }
+      } else {
+        alert(detail || 'Login failed');
+      }
     } finally {
       setActionLoading(null);
     }

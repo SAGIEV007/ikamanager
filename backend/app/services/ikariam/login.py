@@ -18,7 +18,8 @@ Authentication flow (validated against real servers June 2026):
 3. After auth: use the session token to call lobby APIs:
    - GET lobby.ikariam.gameforge.com/api/users/me/accounts (list game accounts)
    - GET lobby.ikariam.gameforge.com/api/servers (list available servers)
-   - GET lobby.ikariam.gameforge.com/api/users/me/loginLink?id=X&server[language]=Y&server[number]=Z
+   - POST lobby.ikariam.gameforge.com/api/users/me/loginLink
+     body: {server: {language, number}, clickedButton: "account_list", id, blackbox}
 
 4. The loginLink returns a URL that logs into the specific game world.
 """
@@ -328,25 +329,33 @@ class IkariamLoginService:
         account_id: str,
         server_language: str,
         server_number: int,
+        blackbox: str = "",
     ) -> str:
-        """Get the login link for a specific game world."""
+        """Get the login link for a specific game world (POST with blackbox)."""
         if not self.auth_token:
             raise GameforgeLoginError("Not authenticated")
 
         headers = {
             **LOBBY_HEADERS,
             "Authorization": f"Bearer {self.auth_token}",
+            "Content-Type": "application/json",
+            "Origin": "https://lobby.ikariam.gameforge.com",
+            "Referer": "https://lobby.ikariam.gameforge.com/en_GB/accounts",
         }
 
-        params = {
+        payload = {
+            "server": {
+                "language": server_language,
+                "number": server_number,
+            },
+            "clickedButton": "account_list",
             "id": account_id,
-            "server[language]": server_language,
-            "server[number]": str(server_number),
+            "blackbox": blackbox,
         }
 
-        async with self.session.get(
+        async with self.session.post(
             LOBBY_LOGIN_LINK,
-            params=params,
+            json=payload,
             headers=headers,
         ) as resp:
             if resp.status != 200:
