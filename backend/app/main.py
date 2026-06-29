@@ -1,7 +1,12 @@
 """IkaManager - Ikariam Automation Platform."""
 
-from fastapi import FastAPI
+import os
+from pathlib import Path
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 
 from app.database import init_db
@@ -28,26 +33,17 @@ app = FastAPI(
 # CORS - allow frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include routers
+# Include API routers
 app.include_router(accounts.router)
 app.include_router(proxies.router)
 app.include_router(automation.router)
 app.include_router(websocket.router)
-
-
-@app.get("/")
-async def root():
-    return {
-        "name": settings.app_name,
-        "version": "1.0.0",
-        "status": "running",
-    }
 
 
 @app.get("/api/health")
@@ -80,3 +76,31 @@ async def get_stats():
         "total_proxies": proxies_count.scalar() or 0,
         "active_tasks": tasks_count.scalar() or 0,
     }
+
+
+# Serve frontend static files (built React app)
+STATIC_DIR = Path(__file__).parent.parent / "static"
+
+if STATIC_DIR.exists():
+    # Serve static assets (JS, CSS, images)
+    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
+
+    # Serve other static files (favicon, icons)
+    @app.get("/favicon.svg")
+    async def favicon():
+        return FileResponse(str(STATIC_DIR / "favicon.svg"))
+
+    @app.get("/icons.svg")
+    async def icons():
+        return FileResponse(str(STATIC_DIR / "icons.svg"))
+
+    # SPA fallback: any non-API route serves index.html
+    @app.get("/{full_path:path}")
+    async def serve_spa(request: Request, full_path: str):
+        # Don't catch API or WebSocket routes
+        if full_path.startswith("api/") or full_path.startswith("ws"):
+            return {"detail": "Not Found"}
+        file_path = STATIC_DIR / full_path
+        if file_path.exists() and file_path.is_file():
+            return FileResponse(str(file_path))
+        return FileResponse(str(STATIC_DIR / "index.html"))

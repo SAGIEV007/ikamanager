@@ -2,34 +2,38 @@
 
 Ikariam automation platform with web interface. Manage multiple accounts with proxy support, resource automation, piracy, donations, and more.
 
-## Como Usar (Simples)
+## Como Usar (Simples - SEM Docker, SEM Node.js)
 
 ### Requisitos
 
-1. Instalar o **Docker Desktop**: https://docs.docker.com/desktop/install/windows-install/
-2. Instalar o **Git**: https://git-scm.com/download/win
+Voce so precisa de **Python** instalado. Nada mais.
+- Download Python: https://www.python.org/downloads/ (marque "Add to PATH" na instalacao)
 
 ### Passo a Passo
 
 ```bash
-# 1. Baixar o projeto
+# 1. Baixar o projeto (no terminal/cmd/PowerShell)
 git clone https://github.com/SAGIEV007/ikamanager.git
 cd ikamanager
 
-# 2. Iniciar (Windows: duplo-clique em start.bat)
-docker compose up --build -d
-
-# 3. Abrir no navegador
-# http://localhost:3000
+# 2. Rodar (UM unico comando)
+python run.py
 ```
 
-**Windows:** Depois de instalar Docker Desktop e Git, basta dar **duplo-clique** no arquivo `start.bat`.
+**Pronto!** Abra http://localhost:8000 no navegador.
 
-**Para parar:** `docker compose down`
+Para parar: `Ctrl+C` no terminal.
+
+### Alternativa com Docker (se preferir)
+
+```bash
+docker compose up --build -d
+# Abrir http://localhost:3000
+```
 
 ### Como funciona o Login
 
-1. Abra http://localhost:3000 no navegador
+1. Abra http://localhost:8000 no navegador
 2. Vá em **Accounts** e clique em **Add Account**
 3. Coloque email, senha, country (BR/US/GB), world (nome do mundo)
 4. Clique no botao de Login (play verde)
