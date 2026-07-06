@@ -158,21 +158,64 @@ class IkariamSession:
     # City detail
     # ------------------------------------------------------------------ #
     async def get_city(self, city_id) -> dict:
-        """Fetch and parse a single city's detailed data (buildings/resources)."""
-        query = (
+        """Fetch and parse a single city's detailed data (buildings/resources).
+
+        Ikabot fetches the plain city page (``?view=city&cityId=X``); the same
+        ``updateBackgroundData`` blob is embedded there. As a fallback we retry
+        with an explicit AJAX request (``X-Requested-With`` header) which returns
+        the JSON array directly.
+        """
+        # The AJAX request (with X-Requested-With) returns the clean JSON array
+        # that the regex expects. Fall back to the plain page if needed.
+        ajax_html = await self._get_ajax(
             f"view=city&cityId={city_id}&backgroundView=city"
-            f"&currentCityId={city_id}&actionRequest={self.action_token or 'REQUESTID'}&ajax=1"
+            f"&currentCityId={city_id}"
+            f"&actionRequest={self.action_token or 'REQUESTID'}&ajax=1"
         )
-        html = await self._get(query)
-        return self._parse_city(html)
+        if re.search(r'"updateBackgroundData"', ajax_html):
+            return self._parse_city(ajax_html)
+
+        plain_html = await self._get(f"view=city&cityId={city_id}")
+        if re.search(r'"updateBackgroundData"', plain_html):
+            return self._parse_city(plain_html)
+
+        # Neither worked - dump whichever we got for diagnosis
+        return self._parse_city(ajax_html or plain_html)
+
+    async def _get_ajax(self, query: str) -> str:
+        await random_delay(self.delay_min, self.delay_max)
+        url = f"{self.base_url}?{query}"
+        headers = {"X-Requested-With": "XMLHttpRequest"}
+        async with self.session.get(url, headers=headers, allow_redirects=True) as resp:
+            return await resp.text()
+
+    def _dump_debug(self, html: str) -> str:
+        """Persist a raw response so parsing issues can be diagnosed."""
+        try:
+            import os
+
+            path = os.path.join(os.getcwd(), "debug_city_response.html")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+            return path
+        except OSError:
+            return ""
 
     def _parse_city(self, html: str) -> dict:
         match = re.search(
             r'"updateBackgroundData",\s?([\s\S]*?)\],\["updateTemplateData"', html
         )
         if not match:
+            # Try a couple of tolerant fallbacks before giving up
+            match = re.search(
+                r'updateBackgroundData"?\s*,\s*(\{[\s\S]*?\})\s*\]\s*,\s*\[\s*"?updateTemplateData',
+                html,
+            )
+        if not match:
+            path = self._dump_debug(html)
+            hint = f" (resposta salva em {path})" if path else ""
             raise GameSessionError(
-                "Nao foi possivel ler os dados da cidade (edificios/recursos)."
+                "Nao foi possivel ler os dados da cidade (edificios/recursos)." + hint
             )
         try:
             city = json.loads(match.group(1), strict=False)
