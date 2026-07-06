@@ -274,6 +274,7 @@ function CityManager({ accountId }: { accountId: number }) {
     try {
       const res = await accountsApi.donate(accountId, city.id, resourceType, amount);
       setMsg(res.data.message || 'Doacao concluida.');
+      await load();
     } catch (err: any) {
       setMsg(err.response?.data?.detail || 'Falha na doacao.');
     } finally {
