@@ -28,6 +28,7 @@ import aiohttp
 from aiohttp_socks import ProxyConnector
 from typing import Optional
 import json
+import re
 import logging
 
 from app.services.ikariam.endpoints import (
@@ -383,7 +384,16 @@ class IkariamLoginService:
                 cookies[cookie.key] = cookie.value
 
             text = await resp.text()
+
+            # Derive the game server base URL from the final/redirected URL
+            final_url = str(resp.url)
+            m = re.search(r"(https://s\d+-\w+\.ikariam\.gameforge\.com)", final_url)
+            if not m:
+                m = re.search(r"(https://s\d+-\w+\.ikariam\.gameforge\.com)", login_url)
+            server_url = m.group(1) if m else ""
+
             return {
                 "cookies": cookies,
-                "html": text[:5000],
+                "server_url": server_url,
+                "html": text,
             }

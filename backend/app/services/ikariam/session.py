@@ -1,14 +1,35 @@
-"""Ikariam game session manager - handles all game interactions."""
+"""Ikariam game session manager - handles all in-game interactions.
+
+Parsing is ported from the proven Ikabot project
+(https://github.com/Ikabot-Collective/ikabot):
+
+- The list of cities is embedded in the main page HTML as
+  ``relatedCityData: JSON.parse('...')``.
+- A city's detailed data (buildings, resources) comes from an AJAX request to
+  ``index.php?view=city&cityId=...&ajax=1`` and is embedded as
+  ``["updateBackgroundData", {...}],["updateTemplateData"``.
+- Every POST action needs a fresh ``actionRequest`` token, which is scraped
+  from any page via ``actionRequest":"..."``.
+
+These endpoints do NOT require the blackbox token - they only need the
+``ikariam`` session cookie obtained after entering the world.
+"""
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
 from typing import Optional
 import re
 import json
-from datetime import datetime, timezone
 
-from app.services.ikariam.endpoints import DEFAULT_HEADERS, GAME_INDEX
+from app.services.ikariam.endpoints import DEFAULT_HEADERS
 from app.utils.humanizer import random_delay
+
+# Resource order used across the game: wood, wine, marble, crystal, sulfur
+RESOURCE_NAMES = ["wood", "wine", "marble", "crystal", "sulfur"]
+
+
+class GameSessionError(Exception):
+    """Raised when the game session is invalid/expired or parsing fails."""
 
 
 class IkariamSession:
@@ -23,14 +44,13 @@ class IkariamSession:
         delay_max: float = 6.0,
     ):
         self.server_url = server_url.rstrip("/")
+        self.base_url = f"{self.server_url}/index.php"
         self.cookies = cookies
         self.proxy_url = proxy_url
         self.delay_min = delay_min
         self.delay_max = delay_max
         self.session: Optional[aiohttp.ClientSession] = None
         self.action_token: Optional[str] = None
-        self.city_ids: list = []
-        self.current_city_id: Optional[int] = None
 
     def _get_connector(self):
         if self.proxy_url:
@@ -39,13 +59,10 @@ class IkariamSession:
 
     async def start(self) -> "IkariamSession":
         connector = self._get_connector()
-        cookie_jar = aiohttp.CookieJar()
         self.session = aiohttp.ClientSession(
             connector=connector,
             headers=DEFAULT_HEADERS,
-            cookie_jar=cookie_jar,
         )
-        # Set cookies
         for name, value in self.cookies.items():
             self.session.cookie_jar.update_cookies({name: value})
         return self
@@ -55,268 +72,213 @@ class IkariamSession:
             await self.session.close()
             self.session = None
 
-    async def _request(self, method: str, path: str, **kwargs) -> str:
-        """Make a request to the game server with human-like delay."""
-        await random_delay(self.delay_min, self.delay_max)
-
-        url = f"{self.server_url}{path}"
-        async with self.session.request(method, url, **kwargs) as resp:
+    # ------------------------------------------------------------------ #
+    # Low level HTTP
+    # ------------------------------------------------------------------ #
+    async def _get(self, query: str = "", humanize: bool = True) -> str:
+        if humanize:
+            await random_delay(self.delay_min, self.delay_max)
+        url = self.base_url
+        if query:
+            url = f"{self.base_url}?{query}"
+        async with self.session.get(url, allow_redirects=True) as resp:
             return await resp.text()
 
-    async def _get(self, params: dict = None) -> str:
-        return await self._request("GET", GAME_INDEX, params=params)
+    async def _post(self, query: str) -> str:
+        await random_delay(self.delay_min, self.delay_max)
+        url = f"{self.base_url}?{query}"
+        async with self.session.post(url) as resp:
+            return await resp.text()
 
-    async def _post(self, data: dict = None, params: dict = None) -> str:
-        return await self._request("POST", GAME_INDEX, data=data, params=params)
+    def _is_expired(self, html: str) -> bool:
+        return "index.php?logout" in html or "lobby.ikariam.gameforge.com" in html[:2000]
 
-    def _extract_action_token(self, html: str) -> Optional[str]:
-        """Extract the actionRequest token from page HTML."""
-        match = re.search(r"actionRequest=([a-f0-9]+)", html)
-        if match:
-            self.action_token = match.group(1)
-            return self.action_token
+    async def get_action_token(self) -> str:
+        """Scrape a fresh actionRequest token from the main page."""
+        html = await self._get(humanize=False)
+        if self._is_expired(html):
+            raise GameSessionError("Sessao do jogo expirada. Faca login novamente.")
+        match = re.search(r'actionRequest"?:\s*"(.*?)"', html)
+        if not match:
+            raise GameSessionError(
+                "Nao foi possivel obter o token de acao (actionRequest)."
+            )
+        self.action_token = match.group(1)
+        return self.action_token
 
-        match = re.search(r"'actionRequest'\s*:\s*'([a-f0-9]+)'", html)
-        if match:
-            self.action_token = match.group(1)
-            return self.action_token
+    # ------------------------------------------------------------------ #
+    # City list
+    # ------------------------------------------------------------------ #
+    async def get_cities(self) -> list:
+        """Return the list of the player's own cities.
 
-        return None
+        Each entry: {id, name, coords, tradegood, relationship}
+        """
+        html = await self._get()
+        if self._is_expired(html):
+            raise GameSessionError("Sessao do jogo expirada. Faca login novamente.")
 
-    def _extract_city_ids(self, html: str) -> list:
-        """Extract city IDs from the page HTML."""
-        matches = re.findall(r"cityId['\"]?\s*[:=]\s*['\"]?(\d+)", html)
-        if matches:
-            self.city_ids = list(set(int(m) for m in matches))
-        return self.city_ids
+        match = re.search(
+            r'relatedCityData:\s*JSON\.parse\(\'(.+?),\\"additionalInfo', html
+        )
+        if not match:
+            raise GameSessionError(
+                "Nao foi possivel ler a lista de cidades. "
+                "O jogo pode ter mudado o formato da pagina."
+            )
 
-    def _extract_json_data(self, html: str) -> dict:
-        """Try to extract JSON data from game response."""
-        # Ikariam sometimes returns JSON in script tags
-        match = re.search(r"var\s+dataSetForView\s*=\s*(\{.*?\});", html, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # Try to parse as JSON directly
+        raw = match.group(1) + "}"
+        raw = raw.replace("\\", "").replace("city_", "")
         try:
-            return json.loads(html)
-        except (json.JSONDecodeError, ValueError):
-            pass
+            data = json.loads(raw, strict=False)
+        except json.JSONDecodeError as e:
+            raise GameSessionError(f"Erro ao interpretar as cidades: {e}")
 
-        return {}
+        cities = []
+        for city_id, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            cities.append(
+                {
+                    "id": str(city_id),
+                    "name": info.get("name", ""),
+                    "coords": info.get("coords", "").strip(),
+                    "tradegood": info.get("tradegood", ""),
+                    "relationship": info.get("relationship", ""),
+                }
+            )
+        # Own cities first
+        cities.sort(key=lambda c: (c["relationship"] != "ownCity", c["id"]))
+        return cities
 
-    async def get_city_view(self, city_id: Optional[int] = None) -> dict:
-        """Get the city view data."""
-        params = {"view": "city"}
-        if city_id:
-            params["cityId"] = str(city_id)
-            self.current_city_id = city_id
+    def own_city_ids(self, cities: list) -> list:
+        return [c["id"] for c in cities if c["relationship"] == "ownCity"]
 
-        html = await self._get(params)
-        self._extract_action_token(html)
-        self._extract_city_ids(html)
+    # ------------------------------------------------------------------ #
+    # City detail
+    # ------------------------------------------------------------------ #
+    async def get_city(self, city_id) -> dict:
+        """Fetch and parse a single city's detailed data (buildings/resources)."""
+        query = (
+            f"view=city&cityId={city_id}&backgroundView=city"
+            f"&currentCityId={city_id}&actionRequest={self.action_token or 'REQUESTID'}&ajax=1"
+        )
+        html = await self._get(query)
+        return self._parse_city(html)
 
-        return self._parse_city_data(html)
+    def _parse_city(self, html: str) -> dict:
+        match = re.search(
+            r'"updateBackgroundData",\s?([\s\S]*?)\],\["updateTemplateData"', html
+        )
+        if not match:
+            raise GameSessionError(
+                "Nao foi possivel ler os dados da cidade (edificios/recursos)."
+            )
+        try:
+            city = json.loads(match.group(1), strict=False)
+        except json.JSONDecodeError as e:
+            raise GameSessionError(f"Erro ao interpretar a cidade: {e}")
 
-    def _parse_city_data(self, html: str) -> dict:
-        """Parse city data from HTML response."""
-        data = {
-            "resources": self._extract_resources(html),
-            "buildings": self._extract_buildings(html),
-            "population": self._extract_population(html),
+        positions = []
+        for i, position in enumerate(city.get("position", [])):
+            building = position.get("building", "")
+            name = position.get("name", "")
+            is_empty = "buildingGround " in building
+            positions.append(
+                {
+                    "position": i,
+                    "name": "empty" if is_empty else name,
+                    "building": "empty" if is_empty else building,
+                    "level": int(position["level"]) if str(position.get("level", "")).isdigit() else None,
+                    "canUpgrade": position.get("canUpgrade"),
+                    "isMaxLevel": position.get("isMaxLevel"),
+                    "isBusy": "constructionSite" in building,
+                }
+            )
+
+        resources = self._extract_resources(html)
+
+        return {
+            "id": str(city.get("id", "")),
+            "name": city.get("name", ""),
+            "islandId": str(city.get("islandId", "")),
+            "islandX": city.get("islandXCoord", ""),
+            "islandY": city.get("islandYCoord", ""),
+            "resources": resources,
+            "positions": positions,
         }
-        return data
 
     def _extract_resources(self, html: str) -> dict:
-        """Extract resource amounts from HTML."""
-        resources = {}
-        patterns = {
-            "wood": r"id=['\"]js_GlobalMenu_wood['\"][^>]*>[\s]*([0-9.,]+)",
-            "wine": r"id=['\"]js_GlobalMenu_wine['\"][^>]*>[\s]*([0-9.,]+)",
-            "marble": r"id=['\"]js_GlobalMenu_marble['\"][^>]*>[\s]*([0-9.,]+)",
-            "crystal": r"id=['\"]js_GlobalMenu_crystal['\"][^>]*>[\s]*([0-9.,]+)",
-            "sulfur": r"id=['\"]js_GlobalMenu_sulfur['\"][^>]*>[\s]*([0-9.,]+)",
-            "gold": r"id=['\"]js_GlobalMenu_gold['\"][^>]*>[\s]*([0-9.,]+)",
-        }
-        for resource, pattern in patterns.items():
-            match = re.search(pattern, html)
-            if match:
-                value_str = match.group(1).replace(",", "").replace(".", "")
-                try:
-                    resources[resource] = int(value_str)
-                except ValueError:
-                    resources[resource] = 0
-            else:
-                resources[resource] = 0
-        return resources
-
-    def _extract_buildings(self, html: str) -> dict:
-        """Extract building information from HTML."""
-        buildings = {}
-        # Pattern for building positions and levels
-        matches = re.findall(
-            r"position(\d+).*?level['\"]?\s*[:=]\s*['\"]?(\d+).*?building['\"]?\s*[:=]\s*['\"]?(\w+)",
+        """Extract current stored resources [wood, wine, marble, crystal, sulfur]."""
+        match = re.search(
+            r'\\"resource\\":(\d+),\\"2\\":(\d+),\\"1\\":(\d+),\\"4\\":(\d+),\\"3\\":(\d+)}',
             html,
-            re.DOTALL,
         )
-        for pos, level, building_type in matches:
-            buildings[f"position_{pos}"] = {
-                "type": building_type,
-                "level": int(level),
-            }
-        return buildings
+        if not match:
+            return {name: 0 for name in RESOURCE_NAMES}
+        wood = int(match.group(1))
+        marble = int(match.group(2))
+        wine = int(match.group(3))
+        sulfur = int(match.group(4))
+        crystal = int(match.group(5))
+        return {
+            "wood": wood,
+            "wine": wine,
+            "marble": marble,
+            "crystal": crystal,
+            "sulfur": sulfur,
+        }
 
-    def _extract_population(self, html: str) -> dict:
-        """Extract population data from HTML."""
-        pop = {}
-        pop_match = re.search(r"population['\"]?\s*[:=]\s*['\"]?(\d+)", html)
-        if pop_match:
-            pop["current"] = int(pop_match.group(1))
-
-        max_match = re.search(r"maxPopulation['\"]?\s*[:=]\s*['\"]?(\d+)", html)
-        if max_match:
-            pop["max"] = int(max_match.group(1))
-
-        return pop
-
-    async def get_island_view(self, island_id: int) -> dict:
-        """Get island view data."""
-        params = {"view": "island", "islandId": str(island_id)}
-        html = await self._get(params)
-        return self._extract_json_data(html)
-
-    async def get_research_view(self) -> dict:
-        """Get research/academy data."""
-        params = {"view": "research"}
-        html = await self._get(params)
-        return self._extract_json_data(html)
-
-    async def get_military_view(self) -> dict:
-        """Get military/barracks data."""
-        params = {"view": "military"}
-        html = await self._get(params)
-        return self._extract_json_data(html)
-
-    async def donate(self, city_id: int, resource_type: str, amount: int) -> bool:
-        """Donate resources to the island (forest or luxury)."""
-        if not self.action_token:
-            await self.get_city_view(city_id)
-
+    # ------------------------------------------------------------------ #
+    # Actions
+    # ------------------------------------------------------------------ #
+    async def donate(self, city_id, island_id, resource_type: str, amount: int) -> str:
+        """Donate resources to the island (forest 'resource' or luxury 'tradegood')."""
+        await self.get_action_token()
         donate_type = "resource" if resource_type == "wood" else "tradegood"
-        data = {
-            "action": "IslandScreen",
-            "function": "donate",
-            "donation": str(amount),
-            "type": donate_type,
-            "cityId": str(city_id),
-            "actionRequest": self.action_token,
-        }
+        query = (
+            f"islandId={island_id}&type={donate_type}&action=IslandScreen"
+            f"&function=donate&donation={int(amount)}&backgroundView=island"
+            f"&templateView=resource&actionRequest={self.action_token}&ajax=1"
+        )
+        return await self._post(query)
 
-        result = await self._post(data=data)
-        self._extract_action_token(result)
-        return "error" not in result.lower()
+    async def upgrade_building(self, city_id, position: int, level, building_type: str) -> str:
+        """Upgrade an existing building at a position."""
+        await self.get_action_token()
+        query = (
+            f"action=UpgradeExistingBuilding&actionRequest={self.action_token}"
+            f"&cityId={city_id}&position={int(position)}&level={level}"
+            f"&activeTab=tabSendTransporter&backgroundView=city"
+            f"&currentCityId={city_id}&templateView={building_type}&ajax=1"
+        )
+        return await self._post(query)
 
-    async def send_resources(
-        self,
-        from_city_id: int,
-        to_city_id: int,
-        wood: int = 0,
-        wine: int = 0,
-        marble: int = 0,
-        crystal: int = 0,
-        sulfur: int = 0,
-    ) -> bool:
-        """Send resources from one city to another."""
-        if not self.action_token:
-            await self.get_city_view(from_city_id)
-
-        data = {
-            "action": "transportOperations",
-            "function": "loadTransporters",
-            "cityId": str(from_city_id),
-            "destinationCityId": str(to_city_id),
-            "cargo_resource": str(wood),
-            "cargo_tradegood1": str(wine),
-            "cargo_tradegood2": str(marble),
-            "cargo_tradegood3": str(crystal),
-            "cargo_tradegood4": str(sulfur),
-            "transpiortSelection": "0",
-            "backgroundView": "city",
-            "currentCityId": str(from_city_id),
-            "actionRequest": self.action_token,
-        }
-
-        result = await self._post(data=data)
-        self._extract_action_token(result)
-        return "error" not in result.lower()
-
-    async def start_building(self, city_id: int, building_position: int) -> bool:
-        """Upgrade a building at given position."""
-        if not self.action_token:
-            await self.get_city_view(city_id)
-
-        data = {
-            "action": "CityScreen",
-            "function": "upgradeBuilding",
-            "cityId": str(city_id),
-            "position": str(building_position),
-            "backgroundView": "city",
-            "currentCityId": str(city_id),
-            "actionRequest": self.action_token,
-        }
-
-        result = await self._post(data=data)
-        self._extract_action_token(result)
-        return "error" not in result.lower()
-
-    async def start_piracy(self, city_id: int) -> bool:
+    async def start_piracy(self, city_id, mission_level: int = 1) -> str:
         """Start a piracy capture mission."""
-        if not self.action_token:
-            await self.get_city_view(city_id)
+        await self.get_action_token()
+        query = (
+            f"action=PiracyScreen&function=capture&view=pirateFortress"
+            f"&cityId={city_id}&activeTab=tabPlunder&startCapture=1"
+            f"&capture={mission_level}&backgroundView=city&currentCityId={city_id}"
+            f"&templateView=pirateFortress&actionRequest={self.action_token}&ajax=1"
+        )
+        return await self._post(query)
 
-        data = {
-            "action": "PirateFortress",
-            "function": "startCapture",
-            "cityId": str(city_id),
-            "backgroundView": "city",
-            "currentCityId": str(city_id),
-            "actionRequest": self.action_token,
-        }
-
-        result = await self._post(data=data)
-        self._extract_action_token(result)
-        return "error" not in result.lower()
-
-    async def activate_miracle(self, island_id: int, city_id: int) -> bool:
-        """Activate a wonder/miracle on an island."""
-        if not self.action_token:
-            await self.get_city_view(city_id)
-
-        data = {
-            "action": "IslandScreen",
-            "function": "activateWonder",
-            "islandId": str(island_id),
-            "cityId": str(city_id),
-            "backgroundView": "island",
-            "currentCityId": str(city_id),
-            "actionRequest": self.action_token,
-        }
-
-        result = await self._post(data=data)
-        self._extract_action_token(result)
-        return "error" not in result.lower()
-
-    async def get_movements(self) -> dict:
-        """Get current military/transport movements."""
-        params = {"view": "militaryAdvisor"}
-        html = await self._get(params)
-        return self._extract_json_data(html)
-
-    async def get_marketplace_offers(self, city_id: int) -> dict:
-        """Get marketplace offers."""
-        params = {"view": "branchOffice", "cityId": str(city_id)}
-        html = await self._get(params)
-        return self._extract_json_data(html)
+    @staticmethod
+    def action_succeeded(resp: str) -> bool:
+        """Best-effort check that a POST action was accepted by the game."""
+        low = resp.lower()
+        if "providefeedback" in low:
+            # Feedback type 10 = success, 11 = rejected (ikabot convention)
+            try:
+                data = json.loads(resp, strict=False)
+                for r in data:
+                    if isinstance(r, list) and r and r[0] == "provideFeedback":
+                        for fb in r[1]:
+                            if fb.get("type") == 11:
+                                return False
+                        return True
+            except (json.JSONDecodeError, TypeError, KeyError):
+                pass
+        return "error" not in low

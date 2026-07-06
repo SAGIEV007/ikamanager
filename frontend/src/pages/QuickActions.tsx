@@ -7,7 +7,7 @@ export function QuickActions() {
   const { accounts, setAccounts } = useStore();
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
-  const [executing, setExecuting] = useState<string | null>(null);
+  const [executing] = useState<string | null>(null);
   const [groupFilter, setGroupFilter] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -52,16 +52,12 @@ export function QuickActions() {
     return true;
   });
 
-  const executeAction = async (action: string) => {
-    if (selected.size === 0) {
-      alert('Select at least one account');
-      return;
-    }
-    setExecuting(action);
-    // In a real implementation, this would call the backend
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    setExecuting(null);
-    alert(`Action "${action}" queued for ${selected.size} account(s). Check Activities for status.`);
+  const executeAction = async (_action: string) => {
+    alert(
+      'As acoes em massa (varias contas de uma vez) ainda nao estao prontas.\n\n' +
+        'Por enquanto, use a pagina "Contas": clique em "Cidades" ao lado de uma conta ' +
+        'online para escolher a cidade e fazer doacao ou melhorar edificios de verdade.'
+    );
   };
 
   if (loading) {

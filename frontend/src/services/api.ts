@@ -100,6 +100,36 @@ function getBlackbox(): string {
   return window.__ikaBlackbox || '';
 }
 
+// Game data types
+export interface City {
+  id: string;
+  name: string;
+  coords: string;
+  tradegood?: string;
+  relationship?: string;
+}
+
+export interface BuildingPosition {
+  position: number;
+  name: string;
+  building: string;
+  level: number | null;
+  canUpgrade: boolean | null;
+  isMaxLevel: boolean | null;
+  isBusy: boolean;
+}
+
+export interface CityDetail {
+  id: string;
+  name: string;
+  islandId: string;
+  coords?: string;
+  tradegood?: string;
+  resources: Record<string, number>;
+  positions: BuildingPosition[];
+  error?: string;
+}
+
 // API calls
 export const accountsApi = {
   list: (group?: string) => api.get<IkariamAccount[]>('/accounts/', { params: { group } }),
@@ -109,12 +139,15 @@ export const accountsApi = {
   delete: (id: number) => api.delete(`/accounts/${id}`),
   login: (id: number) => api.post(`/accounts/${id}/login`, { blackbox: getBlackbox() }),
   logout: (id: number) => api.post(`/accounts/${id}/logout`),
-  enterWorld: (id: number) => api.post(`/accounts/${id}/enter-world`, { blackbox: getBlackbox() }),
-  getGameData: (id: number) => api.get(`/accounts/${id}/game-data`),
-  donate: (id: number, cityId: number, resourceType: string, amount: number) =>
+  getCities: (id: number) => api.get<{ cities: City[] }>(`/accounts/${id}/cities`),
+  getGameData: (id: number) => api.get<{ cities: CityDetail[] }>(`/accounts/${id}/game-data`),
+  getCity: (id: number, cityId: string) => api.get<CityDetail>(`/accounts/${id}/city/${cityId}`),
+  donate: (id: number, cityId: string, resourceType: string, amount: number) =>
     api.post(`/accounts/${id}/donate`, { city_id: cityId, resource_type: resourceType, amount }),
-  build: (id: number, cityId: number, position: number) =>
+  build: (id: number, cityId: string, position: number) =>
     api.post(`/accounts/${id}/build`, { city_id: cityId, position }),
+  piracy: (id: number, cityId: string, missionLevel: number) =>
+    api.post(`/accounts/${id}/piracy`, { city_id: cityId, mission_level: missionLevel }),
 };
 
 export const proxiesApi = {

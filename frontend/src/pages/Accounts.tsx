@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
-import { Plus, Trash2, LogIn, LogOut, RefreshCw, Building2, TreePine } from 'lucide-react';
+import { Fragment, useEffect, useState } from 'react';
+import { Plus, Trash2, LogIn, LogOut, RefreshCw, MapPin, ChevronDown, ChevronRight } from 'lucide-react';
 import { useStore } from '../stores/useStore';
 import { accountsApi, proxiesApi } from '../services/api';
-import type { AccountCreate } from '../services/api';
+import type { AccountCreate, CityDetail } from '../services/api';
 
 export function Accounts() {
   const { accounts, setAccounts, setProxies } = useStore();
@@ -10,6 +10,7 @@ export function Accounts() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<number | null>(null);
 
   useEffect(() => {
     loadData();
@@ -82,32 +83,8 @@ export function Accounts() {
     }
   };
 
-  const handleDonate = async (id: number) => {
-    setActionLoading(id);
-    setActionMessage('Executando doacao...');
-    try {
-      const res = await accountsApi.donate(id, 0, 'wood', 0);
-      setActionMessage(res.data.message || 'Doacao realizada!');
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Falha na doacao. Faca login primeiro.');
-    } finally {
-      setActionLoading(null);
-      setTimeout(() => setActionMessage(null), 5000);
-    }
-  };
-
-  const handleBuild = async (id: number) => {
-    setActionLoading(id);
-    setActionMessage('Iniciando construcao...');
-    try {
-      const res = await accountsApi.build(id, 0, 0);
-      setActionMessage(res.data.message || 'Construcao iniciada!');
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Falha na construcao. Faca login primeiro.');
-    } finally {
-      setActionLoading(null);
-      setTimeout(() => setActionMessage(null), 5000);
-    }
+  const toggleExpand = (id: number) => {
+    setExpanded((cur) => (cur === id ? null : id));
   };
 
   if (loading) {
@@ -167,7 +144,8 @@ export function Accounts() {
             </thead>
             <tbody>
               {accounts.map((account) => (
-                <tr key={account.id} className="border-b border-slate-800 hover:bg-slate-800/30">
+                <Fragment key={account.id}>
+                <tr className="border-b border-slate-800 hover:bg-slate-800/30">
                   <td className="py-3 px-4">
                     <div>
                       <p className="font-medium text-slate-200">{account.nickname}</p>
@@ -175,7 +153,9 @@ export function Accounts() {
                     </div>
                   </td>
                   <td className="py-3 px-4 text-slate-400">
-                    {account.server_world || account.server_country || 'Auto-detectar no login'}
+                    {account.server_world
+                      ? `${account.server_world}${account.server_country ? ' (' + account.server_country + ')' : ''}`
+                      : 'Auto-detectar no login'}
                   </td>
                   <td className="py-3 px-4">
                     <StatusBadge status={account.status} message={account.status_message} />
@@ -185,20 +165,17 @@ export function Accounts() {
                       {account.is_online ? (
                         <>
                           <button
-                            onClick={() => handleDonate(account.id)}
-                            disabled={actionLoading === account.id}
-                            className="p-1.5 rounded text-green-400 hover:bg-green-900/30 transition disabled:opacity-50"
-                            title="Doar recursos na ilha"
+                            onClick={() => toggleExpand(account.id)}
+                            className="flex items-center gap-1 px-2 py-1.5 rounded text-purple-300 hover:bg-purple-900/30 transition text-xs"
+                            title="Ver cidades e executar acoes"
                           >
-                            <TreePine className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => handleBuild(account.id)}
-                            disabled={actionLoading === account.id}
-                            className="p-1.5 rounded text-blue-400 hover:bg-blue-900/30 transition disabled:opacity-50"
-                            title="Melhorar edificio"
-                          >
-                            <Building2 className="w-4 h-4" />
+                            {expanded === account.id ? (
+                              <ChevronDown className="w-4 h-4" />
+                            ) : (
+                              <ChevronRight className="w-4 h-4" />
+                            )}
+                            <MapPin className="w-4 h-4" />
+                            Cidades
                           </button>
                           <button
                             onClick={() => handleLogout(account.id)}
@@ -237,11 +214,219 @@ export function Accounts() {
                     </div>
                   </td>
                 </tr>
+                {expanded === account.id && account.is_online && (
+                  <tr className="border-b border-slate-800 bg-slate-900/40">
+                    <td colSpan={4} className="p-4">
+                      <CityManager accountId={account.id} />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>
         )}
       </div>
+    </div>
+  );
+}
+
+const RESOURCE_LABELS: Record<string, string> = {
+  wood: 'Madeira',
+  wine: 'Vinho',
+  marble: 'Marmore',
+  crystal: 'Cristal',
+  sulfur: 'Enxofre',
+};
+
+function CityManager({ accountId }: { accountId: number }) {
+  const [cities, setCities] = useState<CityDetail[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await accountsApi.getGameData(accountId);
+      setCities(res.data.cities);
+      if (res.data.cities.length > 0) setSelected(res.data.cities[0].id);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Falha ao carregar cidades.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, [accountId]);
+
+  const city = cities?.find((c) => c.id === selected) || null;
+
+  const runDonate = async (resourceType: string, amount: number) => {
+    if (!city) return;
+    setBusy(true);
+    setMsg('Executando doacao...');
+    try {
+      const res = await accountsApi.donate(accountId, city.id, resourceType, amount);
+      setMsg(res.data.message || 'Doacao concluida.');
+    } catch (err: any) {
+      setMsg(err.response?.data?.detail || 'Falha na doacao.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runBuild = async (position: number) => {
+    if (!city) return;
+    setBusy(true);
+    setMsg('Iniciando melhoria...');
+    try {
+      const res = await accountsApi.build(accountId, city.id, position);
+      setMsg(res.data.message || 'Melhoria iniciada.');
+      await load();
+    } catch (err: any) {
+      setMsg(err.response?.data?.detail || 'Falha na melhoria.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (loading) {
+    return <p className="text-sm text-slate-400">Carregando cidades...</p>;
+  }
+
+  if (error) {
+    return (
+      <div className="text-sm">
+        <p className="text-red-400 mb-2">{error}</p>
+        <button onClick={load} className="text-purple-300 hover:underline">
+          Tentar novamente
+        </button>
+      </div>
+    );
+  }
+
+  if (!cities || cities.length === 0) {
+    return <p className="text-sm text-slate-400">Nenhuma cidade encontrada.</p>;
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* City selector */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-slate-400">Cidade:</span>
+        {cities.map((c) => (
+          <button
+            key={c.id}
+            onClick={() => setSelected(c.id)}
+            className={`px-3 py-1.5 rounded-lg text-xs transition ${
+              selected === c.id
+                ? 'bg-purple-700 text-white'
+                : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+            }`}
+          >
+            {c.name} {c.coords ? <span className="opacity-60">{c.coords}</span> : null}
+          </button>
+        ))}
+        <button onClick={load} className="ml-auto text-xs text-slate-400 hover:text-slate-200 flex items-center gap-1">
+          <RefreshCw className="w-3 h-3" /> Atualizar
+        </button>
+      </div>
+
+      {msg && <p className="text-sm text-blue-300">{msg}</p>}
+
+      {city && city.error && (
+        <p className="text-sm text-red-400">Erro ao ler esta cidade: {city.error}</p>
+      )}
+
+      {city && !city.error && (
+        <>
+          {/* Resources */}
+          <div className="flex gap-4 flex-wrap text-xs">
+            {Object.entries(city.resources || {}).map(([k, v]) => (
+              <span key={k} className="text-slate-300">
+                <span className="text-slate-500">{RESOURCE_LABELS[k] || k}:</span>{' '}
+                {v.toLocaleString('pt-BR')}
+              </span>
+            ))}
+          </div>
+
+          {/* Donation */}
+          <div className="bg-slate-800/40 rounded-lg p-3">
+            <p className="text-xs font-medium text-slate-300 mb-2">Doar na ilha</p>
+            <DonateForm disabled={busy} onDonate={runDonate} />
+          </div>
+
+          {/* Buildings */}
+          <div className="bg-slate-800/40 rounded-lg p-3">
+            <p className="text-xs font-medium text-slate-300 mb-2">Edificios (melhorar)</p>
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+              {city.positions
+                .filter((p) => p.building !== 'empty')
+                .map((p) => (
+                  <button
+                    key={p.position}
+                    onClick={() => runBuild(p.position)}
+                    disabled={busy || p.isBusy || p.isMaxLevel === true}
+                    className="flex items-center justify-between gap-2 px-2 py-1.5 rounded bg-slate-900/60 hover:bg-blue-900/30 text-xs text-slate-200 transition disabled:opacity-40"
+                    title={p.isBusy ? 'Ja em construcao' : p.isMaxLevel ? 'Nivel maximo' : 'Melhorar'}
+                  >
+                    <span className="truncate">{p.name}</span>
+                    <span className="text-slate-400">nv {p.level ?? '-'}</span>
+                  </button>
+                ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function DonateForm({
+  disabled,
+  onDonate,
+}: {
+  disabled: boolean;
+  onDonate: (resourceType: string, amount: number) => void;
+}) {
+  const [type, setType] = useState('wood');
+  const [amount, setAmount] = useState('1000');
+
+  return (
+    <div className="flex items-end gap-2 flex-wrap">
+      <div>
+        <label className="block text-[10px] text-slate-500 mb-1">Recurso</label>
+        <select
+          value={type}
+          onChange={(e) => setType(e.target.value)}
+          className="bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-200"
+        >
+          <option value="wood">Madeira (floresta)</option>
+          <option value="tradegood">Bem de luxo (ilha)</option>
+        </select>
+      </div>
+      <div>
+        <label className="block text-[10px] text-slate-500 mb-1">Quantidade</label>
+        <input
+          type="number"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          className="w-28 bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-200"
+        />
+      </div>
+      <button
+        onClick={() => onDonate(type, parseInt(amount || '0', 10))}
+        disabled={disabled}
+        className="px-3 py-1.5 rounded bg-green-700 hover:bg-green-600 text-white text-xs transition disabled:opacity-50"
+      >
+        Doar
+      </button>
     </div>
   );
 }
