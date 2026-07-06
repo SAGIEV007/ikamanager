@@ -297,6 +297,20 @@ function CityManager({ accountId }: { accountId: number }) {
     }
   };
 
+  const runPiracy = async (missionLevel: number) => {
+    if (!city) return;
+    setBusy(true);
+    setMsg('Iniciando pirataria...');
+    try {
+      const res = await accountsApi.piracy(accountId, city.id, missionLevel);
+      setMsg(res.data.message || 'Pirataria iniciada.');
+    } catch (err: any) {
+      setMsg(err.response?.data?.detail || 'Falha na pirataria.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (loading) {
     return <p className="text-sm text-slate-400">Carregando cidades...</p>;
   }
@@ -363,6 +377,14 @@ function CityManager({ accountId }: { accountId: number }) {
             <DonateForm disabled={busy} onDonate={runDonate} />
           </div>
 
+          {/* Piracy (only if the city has a pirate fortress) */}
+          {city.positions.some((p) => p.building === 'pirateFortress') && (
+            <div className="bg-slate-800/40 rounded-lg p-3">
+              <p className="text-xs font-medium text-slate-300 mb-2">Pirataria (fortaleza pirata)</p>
+              <PiracyForm disabled={busy} onStart={runPiracy} />
+            </div>
+          )}
+
           {/* Buildings */}
           <div className="bg-slate-800/40 rounded-lg p-3">
             <p className="text-xs font-medium text-slate-300 mb-2">Edificios (melhorar)</p>
@@ -428,6 +450,57 @@ function DonateForm({
       >
         Doar
       </button>
+    </div>
+  );
+}
+
+const PIRACY_MISSIONS = [
+  { level: 1, label: '2m 30s' },
+  { level: 2, label: '7m 30s' },
+  { level: 3, label: '15m' },
+  { level: 4, label: '30m' },
+  { level: 5, label: '1h' },
+  { level: 6, label: '2h' },
+  { level: 7, label: '4h' },
+  { level: 8, label: '8h' },
+  { level: 9, label: '16h' },
+];
+
+function PiracyForm({
+  disabled,
+  onStart,
+}: {
+  disabled: boolean;
+  onStart: (missionLevel: number) => void;
+}) {
+  const [level, setLevel] = useState('1');
+
+  return (
+    <div className="flex items-end gap-2 flex-wrap">
+      <div>
+        <label className="block text-[10px] text-slate-500 mb-1">Missao</label>
+        <select
+          value={level}
+          onChange={(e) => setLevel(e.target.value)}
+          className="bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-200"
+        >
+          {PIRACY_MISSIONS.map((m) => (
+            <option key={m.level} value={m.level}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <button
+        onClick={() => onStart(parseInt(level, 10))}
+        disabled={disabled}
+        className="px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-white text-xs transition disabled:opacity-50"
+      >
+        Iniciar pirataria
+      </button>
+      <p className="text-[10px] text-slate-500 basis-full">
+        Missoes longas podem exigir captcha (ainda nao automatizado).
+      </p>
     </div>
   );
 }

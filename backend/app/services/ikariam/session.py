@@ -27,6 +27,11 @@ from app.utils.humanizer import random_delay
 # Resource order used across the game: wood, wine, marble, crystal, sulfur
 RESOURCE_NAMES = ["wood", "wine", "marble", "crystal", "sulfur"]
 
+# Piracy mission (1-9) -> required pirate-fortress building level (from Ikabot).
+PIRACY_MISSION_TO_BUILDING_LEVEL = {
+    1: 1, 2: 3, 3: 5, 4: 7, 5: 9, 6: 11, 7: 13, 8: 15, 9: 17,
+}
+
 
 class GameSessionError(Exception):
     """Raised when the game session is invalid/expired or parsing fails."""
@@ -298,15 +303,29 @@ class IkariamSession:
         return await self._post(query)
 
     async def start_piracy(self, city_id, mission_level: int = 1) -> str:
-        """Start a piracy capture mission."""
+        """Start a piracy capture mission.
+
+        ``mission_level`` (1-9) maps to a pirate-fortress building level, exactly
+        like Ikabot's ``piracyMissionToBuildingLevel``:
+        1=2m30s, 2=7m30s, 3=15m, 4=30m, 5=1h, 6=2h, 7=4h, 8=8h, 9=16h.
+        """
+        building_level = PIRACY_MISSION_TO_BUILDING_LEVEL.get(int(mission_level), 1)
         await self.get_action_token()
+        # The game requires "looking at" the origin town before dispatching.
+        await self._get(f"view=city&cityId={city_id}")
         query = (
-            f"action=PiracyScreen&function=capture&view=pirateFortress"
-            f"&cityId={city_id}&activeTab=tabPlunder&startCapture=1"
-            f"&capture={mission_level}&backgroundView=city&currentCityId={city_id}"
+            f"action=PiracyScreen&function=capture&buildingLevel={building_level}"
+            f"&view=pirateFortress&cityId={city_id}&position=17"
+            f"&activeTab=tabBootyQuest&backgroundView=city&currentCityId={city_id}"
             f"&templateView=pirateFortress&actionRequest={self.action_token}&ajax=1"
         )
-        return await self._post(query)
+        html = await self._post(query)
+        if "function=createCaptcha" in html:
+            raise GameSessionError(
+                "A pirataria pediu captcha (missao longa ou muitas seguidas). "
+                "Tente uma missao mais curta ou aguarde um pouco."
+            )
+        return html
 
     @staticmethod
     def action_succeeded(resp: str) -> bool:
