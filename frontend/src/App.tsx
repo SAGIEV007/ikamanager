@@ -4,6 +4,7 @@ import { Dashboard } from './pages/Dashboard';
 import { Accounts } from './pages/Accounts';
 import { Proxies } from './pages/Proxies';
 import { QuickActions } from './pages/QuickActions';
+import { Settings } from './pages/Settings';
 import { useStore } from './stores/useStore';
 
 function App() {
@@ -19,6 +20,8 @@ function App() {
         return <Proxies />;
       case 'quick-actions':
         return <QuickActions />;
+      case 'settings':
+        return <Settings />;
       default:
         return <PlaceholderPage title={currentPage} />;
     }

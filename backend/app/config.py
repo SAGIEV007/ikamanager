@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     default_request_delay_min: float = 2.0
     default_request_delay_max: float = 6.0
     max_requests_per_minute: int = 20
+    # Piracy captcha solving: "auto" (local then 2captcha), "local",
+    # "2captcha", or "off".
+    captcha_mode: str = "auto"
+    twocaptcha_api_key: str = ""
 
     class Config:
         env_file = ".env"

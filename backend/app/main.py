@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from app.database import init_db
 from app.config import get_settings
-from app.routers import accounts, proxies, automation, websocket
+from app.routers import accounts, proxies, automation, websocket, settings as settings_router
 
 
 @asynccontextmanager
@@ -44,6 +44,7 @@ app.include_router(accounts.router)
 app.include_router(proxies.router)
 app.include_router(automation.router)
 app.include_router(websocket.router)
+app.include_router(settings_router.router)
 
 
 @app.get("/api/health")

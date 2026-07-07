@@ -14,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
 from app.services.ikariam.session import IkariamSession, GameSessionError
+from app.services.ikariam import captcha
 from app.models.account import IkariamAccount
+from app.services import app_settings
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,21 @@ class GameActionService:
                 "Sessao do jogo ausente. Faca login novamente para entrar no mundo."
             )
         return data
+
+    def _build_captcha_solver(self):
+        """Return an async captcha solver ``(bytes) -> str`` based on settings.
+
+        Returns ``None`` when captcha solving is disabled ("off").
+        """
+        mode = (app_settings.get_captcha_mode() or "auto").lower()
+        if mode == "off":
+            return None
+        key = app_settings.get_twocaptcha_key()
+
+        async def _solver(image_bytes: bytes) -> str:
+            return await captcha.solve(image_bytes, mode=mode, twocaptcha_key=key)
+
+        return _solver
 
     async def _open_session(self) -> IkariamSession:
         data = self._load_session_data()
@@ -162,7 +179,10 @@ class GameActionService:
     async def start_piracy(self, city_id, mission_level: int = 1) -> dict:
         session = await self._open_session()
         try:
-            resp = await session.start_piracy(city_id, mission_level)
+            solver = self._build_captcha_solver()
+            resp = await session.start_piracy(
+                city_id, mission_level, captcha_solver=solver
+            )
             success = session.action_succeeded(resp)
             self.account.last_action = datetime.utcnow()
             await self.db.commit()

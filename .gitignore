@@ -30,3 +30,7 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+
+# Runtime app settings (may contain API keys)
+ikamanager_settings.json
+backend/ikamanager_settings.json

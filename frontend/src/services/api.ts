@@ -180,6 +180,18 @@ export interface AutoPiracyStatus {
   message: string;
 }
 
+export interface AppSettings {
+  captcha_mode: string;
+  twocaptcha_key_set: boolean;
+  local_captcha_available: boolean;
+}
+
+export const settingsApi = {
+  get: () => api.get<AppSettings>('/settings/'),
+  update: (data: { captcha_mode?: string; twocaptcha_api_key?: string }) =>
+    api.put<AppSettings>('/settings/', data),
+};
+
 export const proxiesApi = {
   list: () => api.get<Proxy[]>('/proxies/'),
   create: (data: ProxyCreate) => api.post<Proxy>('/proxies/', data),

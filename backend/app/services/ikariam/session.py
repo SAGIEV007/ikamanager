@@ -102,6 +102,17 @@ class IkariamSession:
         async with self.session.post(url) as resp:
             return await resp.text()
 
+    async def _post_params(self, params: dict) -> str:
+        await random_delay(self.delay_min, self.delay_max)
+        async with self.session.post(self.base_url, data=params) as resp:
+            return await resp.text()
+
+    async def _get_bytes(self, query: str) -> bytes:
+        await random_delay(self.delay_min, self.delay_max)
+        url = f"{self.base_url}?{query}"
+        async with self.session.get(url, allow_redirects=True) as resp:
+            return await resp.read()
+
     def _is_expired(self, html: str) -> bool:
         return "index.php?logout" in html or "lobby.ikariam.gameforge.com" in html[:2000]
 
@@ -309,12 +320,22 @@ class IkariamSession:
         )
         return await self._post(query)
 
-    async def start_piracy(self, city_id, mission_level: int = 1) -> str:
+    async def get_captcha_image(self) -> bytes:
+        """Fetch the current piracy captcha image (PNG bytes)."""
+        return await self._get_bytes("action=Options&function=createCaptcha")
+
+    async def start_piracy(
+        self, city_id, mission_level: int = 1, captcha_solver=None
+    ) -> str:
         """Start a piracy capture mission.
 
         ``mission_level`` (1-9) maps to a pirate-fortress building level, exactly
         like Ikabot's ``piracyMissionToBuildingLevel``:
         1=2m30s, 2=7m30s, 3=15m, 4=30m, 5=1h, 6=2h, 7=4h, 8=8h, 9=16h.
+
+        ``captcha_solver`` is an optional async callable ``(image_bytes) -> str``.
+        When the game asks for a captcha and a solver is provided, it is solved
+        and the mission is resubmitted (up to a few attempts).
         """
         building_level = PIRACY_MISSION_TO_BUILDING_LEVEL.get(int(mission_level), 1)
         await self.get_action_token()
@@ -327,12 +348,43 @@ class IkariamSession:
             f"&templateView=pirateFortress&actionRequest={self.action_token}&ajax=1"
         )
         html = await self._post(query)
-        if "function=createCaptcha" in html:
+        if "function=createCaptcha" not in html:
+            return html
+
+        if captcha_solver is None:
             raise GameSessionError(
-                "A pirataria pediu captcha (missao longa ou muitas seguidas). "
-                "Tente uma missao mais curta ou aguarde um pouco."
+                "A pirataria pediu captcha e nenhum resolvedor esta configurado. "
+                "Ative o resolvedor local (onnxruntime) ou a chave 2Captcha."
             )
-        return html
+
+        # Solve the captcha and resubmit (Ikabot retries a few times).
+        for _ in range(5):
+            image = await self.get_captcha_image()
+            solution = await captcha_solver(image)
+            # Look at the origin town again before resubmitting.
+            await self._get(f"view=city&cityId={city_id}")
+            params = {
+                "action": "PiracyScreen",
+                "function": "capture",
+                "cityId": str(city_id),
+                "position": "17",
+                "captchaNeeded": "1",
+                "buildingLevel": str(building_level),
+                "captcha": solution,
+                "activeTab": "tabBootyQuest",
+                "backgroundView": "city",
+                "currentCityId": str(city_id),
+                "templateView": "pirateFortress",
+                "actionRequest": self.action_token,
+                "ajax": "1",
+            }
+            html = await self._post_params(params)
+            # Crew still in town => request rejected (wrong captcha); retry.
+            if '"showPirateFortressShip":1' not in html:
+                return html
+        raise GameSessionError(
+            "Nao foi possivel resolver o captcha apos varias tentativas."
+        )
 
     @staticmethod
     def action_succeeded(resp: str) -> bool:
