@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from 'react';
 import { Plus, Trash2, LogIn, LogOut, RefreshCw, MapPin, ChevronDown, ChevronRight } from 'lucide-react';
 import { useStore } from '../stores/useStore';
 import { accountsApi, proxiesApi } from '../services/api';
-import type { AccountCreate, CityDetail } from '../services/api';
+import type { AccountCreate, CityDetail, AutoPiracyStatus } from '../services/api';
 
 export function Accounts() {
   const { accounts, setAccounts, setProxies } = useStore();
@@ -381,7 +381,12 @@ function CityManager({ accountId }: { accountId: number }) {
           {city.positions.some((p) => p.building === 'pirateFortress') && (
             <div className="bg-slate-800/40 rounded-lg p-3">
               <p className="text-xs font-medium text-slate-300 mb-2">Pirataria (fortaleza pirata)</p>
-              <PiracyForm disabled={busy} onStart={runPiracy} />
+              <PiracyForm
+                accountId={accountId}
+                cityId={city.id}
+                disabled={busy}
+                onStart={runPiracy}
+              />
             </div>
           )}
 
@@ -467,39 +472,146 @@ const PIRACY_MISSIONS = [
 ];
 
 function PiracyForm({
+  accountId,
+  cityId,
   disabled,
   onStart,
 }: {
+  accountId: number;
+  cityId: string;
   disabled: boolean;
   onStart: (missionLevel: number) => void;
 }) {
   const [level, setLevel] = useState('1');
+  const [runs, setRuns] = useState('10');
+  const [extraWait, setExtraWait] = useState('30');
+  const [auto, setAuto] = useState<AutoPiracyStatus | null>(null);
+  const [running, setRunning] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const refreshStatus = async () => {
+    try {
+      const res = await accountsApi.autoPiracyStatus(accountId);
+      setRunning(res.data.running);
+      setAuto(res.data.detail);
+    } catch {
+      /* ignore polling errors */
+    }
+  };
+
+  useEffect(() => {
+    refreshStatus();
+    const t = setInterval(refreshStatus, 5000);
+    return () => clearInterval(t);
+  }, [accountId]);
+
+  const startAuto = async () => {
+    setErr(null);
+    try {
+      await accountsApi.startAutoPiracy(
+        accountId,
+        cityId,
+        parseInt(level, 10),
+        parseInt(runs || '1', 10),
+        parseInt(extraWait || '0', 10)
+      );
+      await refreshStatus();
+    } catch (e: any) {
+      setErr(e.response?.data?.detail || 'Falha ao iniciar pirataria automatica.');
+    }
+  };
+
+  const stopAuto = async () => {
+    try {
+      await accountsApi.stopAutoPiracy(accountId);
+      await refreshStatus();
+    } catch (e: any) {
+      setErr(e.response?.data?.detail || 'Falha ao parar.');
+    }
+  };
 
   return (
-    <div className="flex items-end gap-2 flex-wrap">
-      <div>
-        <label className="block text-[10px] text-slate-500 mb-1">Missao</label>
-        <select
-          value={level}
-          onChange={(e) => setLevel(e.target.value)}
-          className="bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-200"
+    <div className="space-y-3">
+      <div className="flex items-end gap-2 flex-wrap">
+        <div>
+          <label className="block text-[10px] text-slate-500 mb-1">Missao</label>
+          <select
+            value={level}
+            onChange={(e) => setLevel(e.target.value)}
+            className="bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-200"
+          >
+            {PIRACY_MISSIONS.map((m) => (
+              <option key={m.level} value={m.level}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          onClick={() => onStart(parseInt(level, 10))}
+          disabled={disabled || running}
+          className="px-3 py-1.5 rounded bg-red-800/70 hover:bg-red-700 text-white text-xs transition disabled:opacity-50"
         >
-          {PIRACY_MISSIONS.map((m) => (
-            <option key={m.level} value={m.level}>
-              {m.label}
-            </option>
-          ))}
-        </select>
+          Rodar 1x
+        </button>
       </div>
-      <button
-        onClick={() => onStart(parseInt(level, 10))}
-        disabled={disabled}
-        className="px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-white text-xs transition disabled:opacity-50"
-      >
-        Iniciar pirataria
-      </button>
-      <p className="text-[10px] text-slate-500 basis-full">
-        Missoes longas podem exigir captcha (ainda nao automatizado).
+
+      <div className="border-t border-slate-700/50 pt-3">
+        <p className="text-[11px] font-medium text-slate-300 mb-2">Automatico (repetir sozinho)</p>
+        <div className="flex items-end gap-2 flex-wrap">
+          <div>
+            <label className="block text-[10px] text-slate-500 mb-1">Quantas vezes</label>
+            <input
+              type="number"
+              min={1}
+              value={runs}
+              onChange={(e) => setRuns(e.target.value)}
+              disabled={running}
+              className="w-20 bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-200 disabled:opacity-50"
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] text-slate-500 mb-1">Espera extra (s)</label>
+            <input
+              type="number"
+              min={0}
+              value={extraWait}
+              onChange={(e) => setExtraWait(e.target.value)}
+              disabled={running}
+              className="w-24 bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-200 disabled:opacity-50"
+            />
+          </div>
+          {running ? (
+            <button
+              onClick={stopAuto}
+              className="px-3 py-1.5 rounded bg-orange-700 hover:bg-orange-600 text-white text-xs transition"
+            >
+              Parar
+            </button>
+          ) : (
+            <button
+              onClick={startAuto}
+              disabled={disabled}
+              className="px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-white text-xs transition disabled:opacity-50"
+            >
+              Iniciar automatico
+            </button>
+          )}
+        </div>
+        <p className="text-[10px] text-slate-500 mt-1">
+          Espera a duracao da missao + tempo aleatorio (0 ate o valor acima) antes de repetir.
+        </p>
+      </div>
+
+      {err && <p className="text-xs text-red-400">{err}</p>}
+      {auto && (
+        <p className="text-xs text-blue-300">
+          {running ? '▶ ' : ''}
+          {auto.runs_done}/{auto.runs} missoes — {auto.message}
+        </p>
+      )}
+      <p className="text-[10px] text-slate-500">
+        Missoes longas podem exigir captcha; nesse caso o automatico para e avisa (resolver captcha automatico e um passo futuro).
       </p>
     </div>
   );

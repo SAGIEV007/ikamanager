@@ -148,7 +148,37 @@ export const accountsApi = {
     api.post(`/accounts/${id}/build`, { city_id: cityId, position }),
   piracy: (id: number, cityId: string, missionLevel: number) =>
     api.post(`/accounts/${id}/piracy`, { city_id: cityId, mission_level: missionLevel }),
+  startAutoPiracy: (
+    id: number,
+    cityId: string,
+    missionLevel: number,
+    runs: number,
+    extraWaitMax: number
+  ) =>
+    api.post(`/accounts/${id}/piracy/auto/start`, {
+      city_id: cityId,
+      mission_level: missionLevel,
+      runs,
+      extra_wait_max: extraWaitMax,
+    }),
+  stopAutoPiracy: (id: number) => api.post(`/accounts/${id}/piracy/auto/stop`),
+  autoPiracyStatus: (id: number) =>
+    api.get<{ running: boolean; detail: AutoPiracyStatus | null }>(
+      `/accounts/${id}/piracy/auto/status`
+    ),
 };
+
+export interface AutoPiracyStatus {
+  state: string;
+  city_id: string;
+  mission_level: number;
+  runs: number;
+  runs_done: number;
+  runs_left: number;
+  extra_wait_max: number;
+  next_run_at: number | null;
+  message: string;
+}
 
 export const proxiesApi = {
   list: () => api.get<Proxy[]>('/proxies/'),

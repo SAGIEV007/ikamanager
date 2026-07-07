@@ -14,6 +14,7 @@ from app.utils.crypto import encrypt_password, decrypt_password
 from app.services.ikariam.login import IkariamLoginService, GameforgeLoginError
 from app.services.ikariam.game_actions import GameActionService, serialize_session
 from app.services.ikariam.session import GameSessionError
+from app.services.ikariam import auto_piracy
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -344,6 +345,13 @@ class PiracyRequest(BaseModel):
     mission_level: int = 1
 
 
+class AutoPiracyRequest(BaseModel):
+    city_id: str
+    mission_level: int = 1
+    runs: int = 10
+    extra_wait_max: int = 30  # extra random seconds added after each mission
+
+
 @router.get("/{account_id}/cities")
 async def list_cities(account_id: int, db: AsyncSession = Depends(get_db)):
     """List the player's cities (name + coordinates) for the logged-in world."""
@@ -492,3 +500,48 @@ async def start_piracy(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
+
+
+@router.post("/{account_id}/piracy/auto/start")
+async def start_auto_piracy(
+    account_id: int, data: AutoPiracyRequest, db: AsyncSession = Depends(get_db)
+):
+    """Start repeating piracy missions automatically (Ikabot-style loop)."""
+    result = await db.execute(
+        select(IkariamAccount).where(IkariamAccount.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if not account.is_online:
+        raise HTTPException(status_code=400, detail="Conta offline. Faca login primeiro.")
+    if data.runs < 1:
+        raise HTTPException(status_code=400, detail="Numero de missoes deve ser >= 1.")
+
+    try:
+        status = auto_piracy.start(
+            account_id=account_id,
+            city_id=data.city_id,
+            mission_level=data.mission_level,
+            runs=data.runs,
+            extra_wait_max=data.extra_wait_max,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"status": "started", "detail": status}
+
+
+@router.post("/{account_id}/piracy/auto/stop")
+async def stop_auto_piracy(account_id: int):
+    """Stop the automatic piracy loop for this account."""
+    await auto_piracy.stop(account_id)
+    return {"status": "stopped", "detail": auto_piracy.get_status(account_id)}
+
+
+@router.get("/{account_id}/piracy/auto/status")
+async def auto_piracy_status(account_id: int):
+    """Get the current status of the automatic piracy loop."""
+    return {
+        "running": auto_piracy.is_running(account_id),
+        "detail": auto_piracy.get_status(account_id),
+    }

@@ -32,6 +32,13 @@ PIRACY_MISSION_TO_BUILDING_LEVEL = {
     1: 1, 2: 3, 3: 5, 4: 7, 5: 9, 6: 11, 7: 13, 8: 15, 9: 17,
 }
 
+# Piracy mission (1-9) -> mission duration in seconds (from Ikabot). The bot must
+# wait at least this long after starting before the mission can be repeated.
+PIRACY_MISSION_WAITING_TIME = {
+    1: 150, 2: 450, 3: 900, 4: 1800, 5: 3600,
+    6: 7200, 7: 14400, 8: 28800, 9: 57600,
+}
+
 
 class GameSessionError(Exception):
     """Raised when the game session is invalid/expired or parsing fails."""
