@@ -26,6 +26,7 @@ Authentication flow (validated against real servers June 2026):
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
+from yarl import URL
 from typing import Optional
 import json
 import re
@@ -88,6 +89,13 @@ class IkariamLoginService:
             await self.session.close()
             self.session = None
 
+    def _set_lobby_cookie(self, token: str) -> None:
+        """Set the gf-token-production lobby cookie (manual-token fallback)."""
+        self.session.cookie_jar.update_cookies(
+            {"gf-token-production": token},
+            response_url=URL("https://lobby.ikariam.gameforge.com"),
+        )
+
     async def login(
         self,
         email: str,
@@ -95,6 +103,7 @@ class IkariamLoginService:
         locale: str = "en-GB",
         gf_lang: str = "en",
         blackbox: str = "",
+        gf_token: str = "",
     ) -> dict:
         """
         Full Gameforge login flow:
@@ -116,10 +125,15 @@ class IkariamLoginService:
         if not self.session:
             await self.create_session()
 
-        # Step 1: Authenticate
-        self.auth_token = await self._authenticate_mauth(
-            email, password, locale, gf_lang, blackbox
-        )
+        # Step 1: Authenticate. A manually-provided gf-token-production bypasses
+        # the whole Spark/challenge flow (Ikabot's manual-token fallback).
+        if gf_token:
+            self.auth_token = gf_token.strip().split("=")[-1]
+            self._set_lobby_cookie(self.auth_token)
+        else:
+            self.auth_token = await self._authenticate_mauth(
+                email, password, locale, gf_lang, blackbox
+            )
         await random_delay(1.0, 2.0)
 
         # Step 2: Get available accounts

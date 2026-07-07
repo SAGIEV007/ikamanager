@@ -31,6 +31,30 @@ export function Accounts() {
     }
   };
 
+  const tryManualToken = async (id: number) => {
+    const instructions =
+      'A Gameforge exigiu um desafio que nao foi possivel passar automaticamente.\n\n' +
+      'Alternativa (como no Ikabot): cole o token manual.\n\n' +
+      '1) Entre em https://lobby.ikariam.gameforge.com/ pelo navegador e faca login\n' +
+      '2) Pressione F12, abra a aba "Console"\n' +
+      "3) Cole e execute: document.cookie.split(';').forEach(x => {if (x.includes('production')) console.log(x)})\n" +
+      '4) Copie o valor de gf-token-production e cole aqui abaixo:';
+    const token = window.prompt(instructions, '');
+    if (!token || !token.trim()) {
+      alert('Login cancelado. Nenhum token informado.');
+      return;
+    }
+    try {
+      setActionMessage('Entrando com token manual...');
+      const res = await accountsApi.login(id, token.trim());
+      setActionMessage(res.data.message || 'Login OK!');
+      await loadData();
+    } catch (e: any) {
+      const d = e.response?.data?.detail;
+      alert((typeof d === 'object' ? d.message : d) || 'Token invalido ou expirado.');
+    }
+  };
+
   const handleLogin = async (id: number) => {
     if (!window.__ikaBlackboxReady) {
       alert('Token blackbox nao esta pronto. Aguarde alguns segundos e tente novamente.');
@@ -44,17 +68,11 @@ export function Accounts() {
       await loadData();
     } catch (err: any) {
       const detail = err.response?.data?.detail;
-      if (typeof detail === 'object') {
-        if (detail.error_type === 'CHALLENGE_REQUIRED') {
-          alert(
-            detail.message ||
-              'A Gameforge pediu um desafio de login. Faca login uma vez pelo navegador em lobby.ikariam.gameforge.com e tente de novo.'
-          );
-        } else if (detail.error_type === 'CREDENTIALS_INVALID') {
-          alert('Email ou senha incorretos.');
-        } else {
-          alert(detail.message || 'Login falhou');
-        }
+      const errorType = typeof detail === 'object' ? detail.error_type : undefined;
+      if (errorType === 'CHALLENGE_REQUIRED' || errorType === 'CREDENTIALS_INVALID') {
+        await tryManualToken(id);
+      } else if (typeof detail === 'object') {
+        alert(detail.message || 'Login falhou');
       } else {
         alert(detail || 'Login falhou');
       }

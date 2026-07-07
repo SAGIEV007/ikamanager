@@ -159,6 +159,7 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
 
 class LoginRequest(BaseModel):
     blackbox: str = ""
+    gf_token: str = ""  # manual gf-token-production cookie (fallback)
 
 
 @router.post("/{account_id}/login")
@@ -187,6 +188,7 @@ async def login_account(
 
     password = decrypt_password(account.password_encrypted)
     blackbox = login_data.blackbox if login_data else ""
+    gf_token = login_data.gf_token if login_data else ""
 
     login_service = IkariamLoginService(proxy_url=proxy_url)
     try:
@@ -194,6 +196,7 @@ async def login_account(
             email=account.email,
             password=password,
             blackbox=blackbox,
+            gf_token=gf_token,
         )
 
         # Auto-detect server info from game accounts

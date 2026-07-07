@@ -137,7 +137,8 @@ export const accountsApi = {
   create: (data: AccountCreate) => api.post<IkariamAccount>('/accounts/', data),
   update: (id: number, data: Partial<IkariamAccount>) => api.put<IkariamAccount>(`/accounts/${id}`, data),
   delete: (id: number) => api.delete(`/accounts/${id}`),
-  login: (id: number) => api.post(`/accounts/${id}/login`, { blackbox: getBlackbox() }),
+  login: (id: number, gfToken?: string) =>
+    api.post(`/accounts/${id}/login`, { blackbox: getBlackbox(), gf_token: gfToken || '' }),
   logout: (id: number) => api.post(`/accounts/${id}/logout`),
   getCities: (id: number) => api.get<{ cities: City[] }>(`/accounts/${id}/cities`),
   getGameData: (id: number) => api.get<{ cities: CityDetail[] }>(`/accounts/${id}/game-data`),
