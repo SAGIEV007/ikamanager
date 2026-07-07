@@ -45,6 +45,7 @@ from app.services.ikariam.endpoints import (
     generate_installation_id,
 )
 from app.utils.humanizer import random_delay
+from app.services.ikariam.lobby_decaptcha import break_interactive_captcha
 
 logger = logging.getLogger(__name__)
 
@@ -165,34 +166,48 @@ class IkariamLoginService:
             "gf-installation-id": self.installation_id,
         }
 
-        async with self.session.post(
-            SPARK_LOGIN_MAUTH,
-            json=payload,
-            headers=headers,
-        ) as resp:
-            text = await resp.text()
+        # Gameforge may answer with an interactive "challenge" (image-drop
+        # captcha) instead of a token. Solve it and retry a few times, like
+        # Ikabot does.
+        for _attempt in range(4):
+            async with self.session.post(
+                SPARK_LOGIN_MAUTH,
+                json=payload,
+                headers=headers,
+            ) as resp:
+                text = await resp.text()
+                status = resp.status
+                challenge_header = resp.headers.get("gf-challenge-id", "")
 
-            if resp.status == 201 or resp.status == 200:
+            if status in (200, 201):
                 data = json.loads(text)
                 token = data.get("token", "")
                 logger.info("Login successful via mauth")
                 return token
 
-            if resp.status == 409:
+            # An interactive challenge is required: solve it, then retry login.
+            if challenge_header and "token" not in text:
+                challenge_id = challenge_header.split(";")[0]
+                solved = await self._solve_interactive_challenge(challenge_id)
+                if not solved:
+                    raise GameforgeLoginError(
+                        "A Gameforge pediu um desafio (captcha de login) e nao "
+                        "foi possivel resolve-lo automaticamente. Faca login uma "
+                        "vez pelo navegador em lobby.ikariam.gameforge.com para "
+                        "limpar e tente de novo.",
+                        error_type="CHALLENGE_REQUIRED",
+                        challenge_id=challenge_id,
+                    )
+                # Loop again to re-attempt the login with the solved challenge.
+                continue
+
+            if status == 409:
                 try:
                     data = json.loads(text)
                 except json.JSONDecodeError:
                     raise GameforgeLoginError(f"Login failed: {text}")
 
                 error_types = data.get("errorTypes", [])
-                challenge_id = data.get("challengeId", "")
-
-                if "CHALLENGE_REQUIRED" in error_types:
-                    raise GameforgeLoginError(
-                        "Challenge required - need valid blackbox or captcha solution",
-                        error_type="CHALLENGE_REQUIRED",
-                        challenge_id=challenge_id,
-                    )
                 if "CREDENTIALS_INVALID" in error_types:
                     raise GameforgeLoginError(
                         "Invalid credentials or untrusted blackbox",
@@ -203,16 +218,73 @@ class IkariamLoginService:
                     error_type=error_types[0] if error_types else "UNKNOWN",
                 )
 
-            if resp.status == 403:
+            if status == 403:
                 raise GameforgeLoginError(
                     "Account blocked or too many attempts",
                     error_type="BLOCKED",
                 )
 
             raise GameforgeLoginError(
-                f"Login failed with status {resp.status}: {text}",
+                f"Login failed with status {status}: {text}",
                 error_type="HTTP_ERROR",
             )
+
+        raise GameforgeLoginError(
+            "Nao foi possivel completar o login apos resolver o desafio varias "
+            "vezes. Tente novamente em instantes.",
+            error_type="CHALLENGE_REQUIRED",
+        )
+
+    async def _solve_interactive_challenge(self, challenge_id: str) -> bool:
+        """Solve Gameforge's image-drop login challenge.
+
+        Fetches the text image + 4 drag icons, matches them with the local
+        model (ported from Ikabot's ``lobbyDecaptcha``) and submits the answer.
+        Returns True when the challenge is reported as solved.
+        """
+        base = f"https://image-drop-challenge.gameforge.com/challenge/{challenge_id}/en-GB"
+        ch_headers = {
+            "Accept": "*/*",
+            "Origin": "https://lobby.ikariam.gameforge.com",
+            "Referer": "https://lobby.ikariam.gameforge.com/",
+        }
+        try:
+            # Warm-up requests mirroring the browser flow.
+            await self.session.get(
+                f"{CHALLENGE_BASE}/challenge/{challenge_id}", headers=ch_headers
+            )
+            await self.session.get(
+                "https://image-drop-challenge.gameforge.com/index.js", headers=ch_headers
+            )
+            try:
+                await self.session.post(
+                    "https://pixelzirkus.gameforge.com/do2/simple", headers=ch_headers
+                )
+            except Exception:
+                pass
+
+            async with self.session.get(base, headers=ch_headers) as resp:
+                meta = await resp.json()
+            captcha_time = meta.get("lastUpdated", "")
+
+            async with self.session.get(
+                f"{base}/text?{captcha_time}", headers=ch_headers
+            ) as resp:
+                text_image = await resp.read()
+            async with self.session.get(
+                f"{base}/drag-icons?{captcha_time}", headers=ch_headers
+            ) as resp:
+                drag_icons = await resp.read()
+
+            answer = break_interactive_captcha(text_image, drag_icons)
+            async with self.session.post(
+                base, json={"answer": answer}, headers=ch_headers
+            ) as resp:
+                result = await resp.json()
+            return result.get("status") == "solved"
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Interactive challenge solve failed: %s", e)
+            return False
 
     async def login_with_credentials(
         self,

@@ -46,7 +46,10 @@ export function Accounts() {
       const detail = err.response?.data?.detail;
       if (typeof detail === 'object') {
         if (detail.error_type === 'CHALLENGE_REQUIRED') {
-          alert('Challenge necessario. Token blackbox rejeitado. Tente recarregar a pagina.');
+          alert(
+            detail.message ||
+              'A Gameforge pediu um desafio de login. Faca login uma vez pelo navegador em lobby.ikariam.gameforge.com e tente de novo.'
+          );
         } else if (detail.error_type === 'CREDENTIALS_INVALID') {
           alert('Email ou senha incorretos.');
         } else {
