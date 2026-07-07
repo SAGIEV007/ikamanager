@@ -1,5 +1,6 @@
 """API routes for Ikariam account management."""
 
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -14,7 +15,10 @@ from app.utils.crypto import encrypt_password, decrypt_password
 from app.services.ikariam.login import IkariamLoginService, GameforgeLoginError
 from app.services.ikariam.game_actions import GameActionService, serialize_session
 from app.services.ikariam.session import GameSessionError
+from app.services.ikariam.captcha import CaptchaError
 from app.services.ikariam import auto_piracy
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -501,7 +505,10 @@ async def start_piracy(
         )
     except GameSessionError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except CaptchaError as e:
+        raise HTTPException(status_code=400, detail=f"Captcha: {str(e)}")
     except Exception as e:
+        logger.exception("Piracy failed for account %s", account_id)
         raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
 
 
