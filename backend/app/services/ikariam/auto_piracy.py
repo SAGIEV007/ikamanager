@@ -11,6 +11,7 @@ import asyncio
 import logging
 import random
 import time
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import select
@@ -49,6 +50,44 @@ async def _resolve_proxy_url(db, account: IkariamAccount) -> Optional[str]:
     return proxy.url if proxy else None
 
 
+def _seconds_until_window(start_hour: int, end_hour: int, now: Optional[datetime] = None) -> int:
+    """Seconds to wait until inside the operation window; 0 if already inside.
+
+    Supports windows that wrap past midnight (e.g. start=22, end=6).
+    """
+    now = now or datetime.now()
+    if start_hour == end_hour:
+        return 0  # no restriction (24h)
+    h = now.hour + now.minute / 60 + now.second / 3600
+    if start_hour < end_hour:
+        inside = start_hour <= h < end_hour
+    else:  # wraps midnight
+        inside = h >= start_hour or h < end_hour
+    if inside:
+        return 0
+    # Compute seconds until the next occurrence of start_hour.
+    target = now.replace(hour=int(start_hour) % 24, minute=0, second=0, microsecond=0)
+    delta = (target - now).total_seconds()
+    if delta <= 0:
+        delta += 24 * 3600
+    return int(delta)
+
+
+def _compute_wait(base_wait: int, extra_wait_max: int) -> int:
+    """Human-like wait between missions.
+
+    - base mission duration
+    - a uniform random extra (0..extra_wait_max) chosen by the user
+    - a small always-on jitter so intervals are never identical/robotic
+    - a ~12% chance of a longer "coffee break" (2-8 min) to look human
+    """
+    wait_s = base_wait + random.randint(0, max(0, extra_wait_max))
+    wait_s += random.randint(5, 45)  # always-on jitter
+    if random.random() < 0.12:
+        wait_s += random.randint(120, 480)  # occasional longer break
+    return wait_s
+
+
 async def _run_loop(
     account_id: int,
     city_id: str,
@@ -59,7 +98,37 @@ async def _run_loop(
     status = _STATUS[account_id]
     base_wait = PIRACY_MISSION_WAITING_TIME.get(int(mission_level), 150)
     try:
-        for _ in range(runs):
+        while status["runs_done"] < runs:
+            async with async_session() as db:
+                account = (
+                    await db.execute(
+                        select(IkariamAccount).where(IkariamAccount.id == account_id)
+                    )
+                ).scalar_one_or_none()
+                if account is None:
+                    status["state"] = "error"
+                    status["message"] = "Conta nao encontrada."
+                    return
+
+                # Respect the account's operation hours: outside the window, the
+                # bot stays idle (a normal player doesn't grind 24/7).
+                wait_window = _seconds_until_window(
+                    account.operation_start_hour, account.operation_end_hour
+                )
+                if wait_window > 0:
+                    status["state"] = "waiting_hours"
+                    status["next_run_at"] = time.time() + wait_window
+                    status["message"] = (
+                        "Fora do horario de operacao "
+                        f"({account.operation_start_hour}h-{account.operation_end_hour}h). "
+                        f"Retomando em ~{wait_window // 3600}h{(wait_window % 3600) // 60}min."
+                    )
+
+            if wait_window > 0:
+                await asyncio.sleep(wait_window)
+                status["state"] = "running"
+                continue  # re-evaluate everything after waiting
+
             async with async_session() as db:
                 account = (
                     await db.execute(
@@ -90,7 +159,7 @@ async def _run_loop(
             if status["runs_done"] >= runs:
                 break
 
-            wait_s = base_wait + random.randint(0, max(0, extra_wait_max))
+            wait_s = _compute_wait(base_wait, extra_wait_max)
             status["next_run_at"] = time.time() + wait_s
             status["message"] = (
                 f"Missao {status['runs_done']}/{runs} iniciada. "

@@ -15,6 +15,7 @@ from datetime import datetime
 
 from app.services.ikariam.session import IkariamSession, GameSessionError
 from app.services.ikariam import captcha
+from app.services.ikariam import account_locks
 from app.models.account import IkariamAccount
 from app.services import app_settings
 
@@ -84,114 +85,120 @@ class GameActionService:
         return session
 
     async def get_cities(self) -> list:
-        session = await self._open_session()
-        try:
-            return await session.get_cities()
-        finally:
-            await session.close()
+        async with account_locks.get_lock(self.account.id):
+            session = await self._open_session()
+            try:
+                return await session.get_cities()
+            finally:
+                await session.close()
 
     async def get_city(self, city_id) -> dict:
-        session = await self._open_session()
-        try:
-            await session.get_action_token()
-            return await session.get_city(city_id)
-        finally:
-            await session.close()
+        async with account_locks.get_lock(self.account.id):
+            session = await self._open_session()
+            try:
+                await session.get_action_token()
+                return await session.get_city(city_id)
+            finally:
+                await session.close()
 
     async def get_full_game_data(self) -> dict:
         """List cities and load detail for each own city."""
-        session = await self._open_session()
-        try:
-            cities = await session.get_cities()
-            await session.get_action_token()
-            detailed = []
-            for c in cities:
-                if c["relationship"] != "ownCity":
-                    continue
-                try:
-                    detail = await session.get_city(c["id"])
-                    detail["coords"] = c["coords"]
-                    detail["tradegood"] = c["tradegood"]
-                    detailed.append(detail)
-                except GameSessionError as e:
-                    detailed.append(
-                        {"id": c["id"], "name": c["name"], "coords": c["coords"], "error": str(e)}
-                    )
-            return {"cities": detailed}
-        finally:
-            await session.close()
+        async with account_locks.get_lock(self.account.id):
+            session = await self._open_session()
+            try:
+                cities = await session.get_cities()
+                await session.get_action_token()
+                detailed = []
+                for c in cities:
+                    if c["relationship"] != "ownCity":
+                        continue
+                    try:
+                        detail = await session.get_city(c["id"])
+                        detail["coords"] = c["coords"]
+                        detail["tradegood"] = c["tradegood"]
+                        detailed.append(detail)
+                    except GameSessionError as e:
+                        detailed.append(
+                            {"id": c["id"], "name": c["name"], "coords": c["coords"], "error": str(e)}
+                        )
+                return {"cities": detailed}
+            finally:
+                await session.close()
 
     async def donate(self, city_id, resource_type: str, amount: int) -> dict:
-        session = await self._open_session()
-        try:
-            # Resolve island id for the city
-            detail = await self.get_city_detail(session, city_id)
-            island_id = detail.get("islandId", "")
-            if not island_id:
-                return {"status": "failed", "message": "Ilha da cidade nao encontrada."}
-            resp = await session.donate(city_id, island_id, resource_type, amount)
-            success = session.action_succeeded(resp)
-            self.account.last_action = datetime.utcnow()
-            await self.db.commit()
-            return {
-                "status": "success" if success else "failed",
-                "message": (
-                    f"Doacao de {amount} de {resource_type} "
-                    + ("realizada." if success else "falhou.")
-                ),
-            }
-        finally:
-            await session.close()
+        async with account_locks.get_lock(self.account.id):
+            session = await self._open_session()
+            try:
+                # Resolve island id for the city
+                detail = await self.get_city_detail(session, city_id)
+                island_id = detail.get("islandId", "")
+                if not island_id:
+                    return {"status": "failed", "message": "Ilha da cidade nao encontrada."}
+                resp = await session.donate(city_id, island_id, resource_type, amount)
+                success = session.action_succeeded(resp)
+                self.account.last_action = datetime.utcnow()
+                await self.db.commit()
+                return {
+                    "status": "success" if success else "failed",
+                    "message": (
+                        f"Doacao de {amount} de {resource_type} "
+                        + ("realizada." if success else "falhou.")
+                    ),
+                }
+            finally:
+                await session.close()
 
     async def upgrade_building(self, city_id, position: int) -> dict:
-        session = await self._open_session()
-        try:
-            await session.get_action_token()
-            detail = await session.get_city(city_id)
-            positions = detail.get("positions", [])
-            if position < 0 or position >= len(positions):
-                return {"status": "failed", "message": "Posicao de edificio invalida."}
-            building = positions[position]
-            if building["building"] == "empty":
+        async with account_locks.get_lock(self.account.id):
+            session = await self._open_session()
+            try:
+                await session.get_action_token()
+                detail = await session.get_city(city_id)
+                positions = detail.get("positions", [])
+                if position < 0 or position >= len(positions):
+                    return {"status": "failed", "message": "Posicao de edificio invalida."}
+                building = positions[position]
+                if building["building"] == "empty":
+                    return {
+                        "status": "failed",
+                        "message": "Nao ha edificio nesta posicao para melhorar.",
+                    }
+                resp = await session.upgrade_building(
+                    city_id=city_id,
+                    position=position,
+                    level=building["level"],
+                    building_type=building["building"],
+                )
+                success = session.action_succeeded(resp)
+                self.account.last_action = datetime.utcnow()
+                await self.db.commit()
                 return {
-                    "status": "failed",
-                    "message": "Nao ha edificio nesta posicao para melhorar.",
+                    "status": "success" if success else "failed",
+                    "message": (
+                        f"Melhoria de {building['name']} (pos {position}) "
+                        + ("iniciada." if success else "falhou.")
+                    ),
                 }
-            resp = await session.upgrade_building(
-                city_id=city_id,
-                position=position,
-                level=building["level"],
-                building_type=building["building"],
-            )
-            success = session.action_succeeded(resp)
-            self.account.last_action = datetime.utcnow()
-            await self.db.commit()
-            return {
-                "status": "success" if success else "failed",
-                "message": (
-                    f"Melhoria de {building['name']} (pos {position}) "
-                    + ("iniciada." if success else "falhou.")
-                ),
-            }
-        finally:
-            await session.close()
+            finally:
+                await session.close()
 
     async def start_piracy(self, city_id, mission_level: int = 1) -> dict:
-        session = await self._open_session()
-        try:
-            solver = self._build_captcha_solver()
-            resp = await session.start_piracy(
-                city_id, mission_level, captcha_solver=solver
-            )
-            success = session.action_succeeded(resp)
-            self.account.last_action = datetime.utcnow()
-            await self.db.commit()
-            return {
-                "status": "success" if success else "failed",
-                "message": "Pirataria " + ("iniciada." if success else "falhou."),
-            }
-        finally:
-            await session.close()
+        async with account_locks.get_lock(self.account.id):
+            session = await self._open_session()
+            try:
+                solver = self._build_captcha_solver()
+                resp = await session.start_piracy(
+                    city_id, mission_level, captcha_solver=solver
+                )
+                success = session.action_succeeded(resp)
+                self.account.last_action = datetime.utcnow()
+                await self.db.commit()
+                return {
+                    "status": "success" if success else "failed",
+                    "message": "Pirataria " + ("iniciada." if success else "falhou."),
+                }
+            finally:
+                await session.close()
 
     @staticmethod
     async def get_city_detail(session: IkariamSession, city_id) -> dict:
