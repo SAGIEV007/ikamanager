@@ -11,12 +11,14 @@ import os
 
 os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend"))
 
-# Install dependencies if needed
+# Install dependencies if needed. onnxruntime is checked separately because it
+# was added after the first release, so existing installs won't have it yet.
 try:
     import fastapi
     import aiohttp
+    import onnxruntime  # local captcha solver
 except ImportError:
-    print("Installing dependencies...")
+    print("Installing dependencies (pode demorar 1-2 min na primeira vez)...")
     subprocess.check_call([
         sys.executable, "-m", "pip", "install", "-r", "requirements.txt",
         "aiosqlite", "--quiet"
