@@ -90,6 +90,16 @@ class IkariamSession:
     # ------------------------------------------------------------------ #
     # Low level HTTP
     # ------------------------------------------------------------------ #
+    def _update_token(self, html: str) -> None:
+        """Scrape the latest ``actionRequest`` token from a response and store it.
+
+        The game rotates this token on every request, so (like Ikabot) we keep it
+        current from each response and re-inject it into the next request.
+        """
+        match = re.search(r'actionRequest"?:\s*"(.*?)"', html)
+        if match:
+            self.action_token = match.group(1)
+
     async def _get(self, query: str = "", humanize: bool = True) -> str:
         if humanize:
             await random_delay(self.delay_min, self.delay_max)
@@ -97,18 +107,24 @@ class IkariamSession:
         if query:
             url = f"{self.base_url}?{query}"
         async with self.session.get(url, allow_redirects=True) as resp:
-            return await resp.text()
+            html = await resp.text()
+        self._update_token(html)
+        return html
 
     async def _post(self, query: str) -> str:
         await random_delay(self.delay_min, self.delay_max)
         url = f"{self.base_url}?{query}"
         async with self.session.post(url) as resp:
-            return await resp.text()
+            html = await resp.text()
+        self._update_token(html)
+        return html
 
     async def _post_params(self, params: dict) -> str:
         await random_delay(self.delay_min, self.delay_max)
         async with self.session.post(self.base_url, data=params) as resp:
-            return await resp.text()
+            html = await resp.text()
+        self._update_token(html)
+        return html
 
     async def _post_query(self, params: dict) -> str:
         """POST with params in the URL query string and no ``index.php`` in the
@@ -117,7 +133,9 @@ class IkariamSession:
         await random_delay(self.delay_min, self.delay_max)
         url = f"{self.server_url}/"
         async with self.session.post(url, params=params) as resp:
-            return await resp.text()
+            html = await resp.text()
+        self._update_token(html)
+        return html
 
     async def _get_bytes(self, query: str) -> bytes:
         await random_delay(self.delay_min, self.delay_max)
@@ -380,6 +398,10 @@ class IkariamSession:
             attempts.append(solution)
             # Look at the origin town again before resubmitting (Ikabot POSTs here).
             await self._post(f"view=city&cityId={city_id}")
+            # Ikabot fetches a fresh actionRequest token right before each submit
+            # (its post() calls __token() -> a new GET). The token rotates per
+            # request, so a stale one is rejected.
+            await self.get_action_token()
             params = {
                 "action": "PiracyScreen",
                 "function": "capture",
