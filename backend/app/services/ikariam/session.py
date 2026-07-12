@@ -110,6 +110,15 @@ class IkariamSession:
         async with self.session.post(self.base_url, data=params) as resp:
             return await resp.text()
 
+    async def _post_query(self, params: dict) -> str:
+        """POST with params in the URL query string and no ``index.php`` in the
+        path (Ikabot's ``session.post(params=params, noIndex=True)``). The
+        piracy captcha resubmit requires exactly this form."""
+        await random_delay(self.delay_min, self.delay_max)
+        url = f"{self.server_url}/"
+        async with self.session.post(url, params=params) as resp:
+            return await resp.text()
+
     async def _get_bytes(self, query: str) -> bytes:
         await random_delay(self.delay_min, self.delay_max)
         url = f"{self.base_url}?{query}"
@@ -369,8 +378,8 @@ class IkariamSession:
             solution = await captcha_solver(image)
             logger.info("Piracy captcha attempt %s: solver returned %r", attempt + 1, solution)
             attempts.append(solution)
-            # Look at the origin town again before resubmitting.
-            await self._get(f"view=city&cityId={city_id}")
+            # Look at the origin town again before resubmitting (Ikabot POSTs here).
+            await self._post(f"view=city&cityId={city_id}")
             params = {
                 "action": "PiracyScreen",
                 "function": "capture",
@@ -386,7 +395,7 @@ class IkariamSession:
                 "actionRequest": self.action_token,
                 "ajax": "1",
             }
-            html = await self._post_params(params)
+            html = await self._post_query(params)
             # Crew still in town => request rejected (wrong captcha); retry.
             if '"showPirateFortressShip":1' not in html:
                 return html
