@@ -20,9 +20,12 @@ from aiohttp_socks import ProxyConnector
 from typing import Optional
 import re
 import json
+import logging
 
 from app.services.ikariam.endpoints import DEFAULT_HEADERS
 from app.utils.humanizer import random_delay
+
+logger = logging.getLogger(__name__)
 
 # Resource order used across the game: wood, wine, marble, crystal, sulfur
 RESOURCE_NAMES = ["wood", "wine", "marble", "crystal", "sulfur"]
@@ -358,9 +361,18 @@ class IkariamSession:
             )
 
         # Solve the captcha and resubmit (Ikabot retries a few times).
-        for _ in range(5):
+        attempts = []
+        for attempt in range(5):
             image = await self.get_captcha_image()
+            # Save the captcha image for diagnosis (overwrites each attempt).
+            try:
+                with open(f"debug_captcha_{attempt + 1}.png", "wb") as f:
+                    f.write(image)
+            except Exception:  # noqa: BLE001
+                pass
             solution = await captcha_solver(image)
+            logger.info("Piracy captcha attempt %s: solver returned %r", attempt + 1, solution)
+            attempts.append(solution)
             # Look at the origin town again before resubmitting.
             await self._get(f"view=city&cityId={city_id}")
             params = {
@@ -383,7 +395,9 @@ class IkariamSession:
             if '"showPirateFortressShip":1' not in html:
                 return html
         raise GameSessionError(
-            "Nao foi possivel resolver o captcha apos varias tentativas."
+            "Nao foi possivel resolver o captcha apos varias tentativas. "
+            f"Respostas tentadas: {attempts}. As imagens foram salvas como "
+            "debug_captcha_1.png ... debug_captcha_5.png."
         )
 
     @staticmethod
