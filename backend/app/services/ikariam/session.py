@@ -360,16 +360,12 @@ class IkariamSession:
                 "Ative o resolvedor local (onnxruntime) ou a chave 2Captcha."
             )
 
-        # Solve the captcha and resubmit (Ikabot retries a few times).
+        # Solve the captcha and resubmit. The local model is imperfect per image,
+        # but each retry pulls a fresh captcha, so many attempts (like Ikabot's 20)
+        # eventually land a correct read.
         attempts = []
-        for attempt in range(5):
+        for attempt in range(20):
             image = await self.get_captcha_image()
-            # Save the captcha image for diagnosis (overwrites each attempt).
-            try:
-                with open(f"debug_captcha_{attempt + 1}.png", "wb") as f:
-                    f.write(image)
-            except Exception:  # noqa: BLE001
-                pass
             solution = await captcha_solver(image)
             logger.info("Piracy captcha attempt %s: solver returned %r", attempt + 1, solution)
             attempts.append(solution)
@@ -395,9 +391,9 @@ class IkariamSession:
             if '"showPirateFortressShip":1' not in html:
                 return html
         raise GameSessionError(
-            "Nao foi possivel resolver o captcha apos varias tentativas. "
-            f"Respostas tentadas: {attempts}. As imagens foram salvas como "
-            "debug_captcha_1.png ... debug_captcha_5.png."
+            "Nao foi possivel resolver o captcha apos varias tentativas "
+            f"({len(attempts)}). O modelo local errou a leitura; considere usar "
+            "o 2Captcha (pago) nas configuracoes para maior precisao."
         )
 
     @staticmethod
