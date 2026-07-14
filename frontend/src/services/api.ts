@@ -143,10 +143,31 @@ export const accountsApi = {
   getCities: (id: number) => api.get<{ cities: City[] }>(`/accounts/${id}/cities`),
   getGameData: (id: number) => api.get<{ cities: CityDetail[] }>(`/accounts/${id}/game-data`),
   getCity: (id: number, cityId: string) => api.get<CityDetail>(`/accounts/${id}/city/${cityId}`),
-  donate: (id: number, cityId: string, resourceType: string, amount: number) =>
-    api.post(`/accounts/${id}/donate`, { city_id: cityId, resource_type: resourceType, amount }),
+  donate: (id: number, cityId: string, resourceType: string, amount: number, percent = 0) =>
+    api.post(`/accounts/${id}/donate`, {
+      city_id: cityId,
+      resource_type: resourceType,
+      amount,
+      percent,
+    }),
   build: (id: number, cityId: string, position: number) =>
     api.post(`/accounts/${id}/build`, { city_id: cityId, position }),
+  // Recurring donations (island upgrade bot)
+  startAutoDonate: (id: number, cfg: AutoDonateConfig) =>
+    api.post(`/accounts/${id}/donate/auto/start`, cfg),
+  stopAutoDonate: (id: number) => api.post(`/accounts/${id}/donate/auto/stop`),
+  autoDonateStatus: (id: number) =>
+    api.get<{ running: boolean; detail: ResourceTaskStatus | null }>(
+      `/accounts/${id}/donate/auto/status`
+    ),
+  // Recurring building upgrades
+  startAutoUpgrade: (id: number, cfg: AutoUpgradeConfig) =>
+    api.post(`/accounts/${id}/upgrade/auto/start`, cfg),
+  stopAutoUpgrade: (id: number) => api.post(`/accounts/${id}/upgrade/auto/stop`),
+  autoUpgradeStatus: (id: number) =>
+    api.get<{ running: boolean; detail: ResourceTaskStatus | null }>(
+      `/accounts/${id}/upgrade/auto/status`
+    ),
   piracy: (id: number, cityId: string, missionLevel: number) =>
     api.post(`/accounts/${id}/piracy`, { city_id: cityId, mission_level: missionLevel }),
   startAutoPiracy: (
@@ -167,6 +188,50 @@ export const accountsApi = {
     api.get<{ running: boolean; detail: AutoPiracyStatus | null }>(
       `/accounts/${id}/piracy/auto/status`
     ),
+};
+
+export interface AutoDonateConfig {
+  city_id: string;
+  resource_type: string;
+  amount?: number;
+  percent?: number;
+  interval_minutes?: number;
+  extra_wait_max?: number;
+  runs?: number;
+}
+
+export interface AutoUpgradeConfig {
+  city_id: string;
+  position?: number | null;
+  interval_minutes?: number;
+  extra_wait_max?: number;
+  runs?: number;
+}
+
+export interface ResourceTaskStatus {
+  state: string;
+  kind?: string;
+  account_id?: number;
+  running?: boolean;
+  runs: number;
+  runs_done: number;
+  next_run_at: number | null;
+  message: string;
+  last_result?: string;
+  last_message?: string;
+  config?: Record<string, unknown>;
+}
+
+export const bulkApi = {
+  startDonate: (accountIds: number[], cfg: AutoDonateConfig) =>
+    api.post('/bulk/donate/auto/start', { account_ids: accountIds, ...cfg }),
+  stopDonate: (accountIds: number[]) =>
+    api.post('/bulk/donate/auto/stop', { account_ids: accountIds }),
+  startUpgrade: (accountIds: number[], cfg: AutoUpgradeConfig) =>
+    api.post('/bulk/upgrade/auto/start', { account_ids: accountIds, ...cfg }),
+  stopUpgrade: (accountIds: number[]) =>
+    api.post('/bulk/upgrade/auto/stop', { account_ids: accountIds }),
+  status: () => api.get<{ tasks: ResourceTaskStatus[] }>('/bulk/resources/status'),
 };
 
 export interface AutoPiracyStatus {

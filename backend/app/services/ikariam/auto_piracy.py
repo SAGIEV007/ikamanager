@@ -9,17 +9,19 @@ asyncio task tracked in-memory. Status is exposed so the UI can poll it.
 
 import asyncio
 import logging
-import random
 import time
-from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import select
 
 from app.database import async_session
 from app.models.account import IkariamAccount
-from app.models.proxy import Proxy
 from app.services.ikariam.game_actions import GameActionService
+from app.services.ikariam.runner_common import (
+    human_wait,
+    resolve_proxy_url,
+    seconds_until_window,
+)
 from app.services.ikariam.session import (
     GameSessionError,
     PIRACY_MISSION_WAITING_TIME,
@@ -40,52 +42,6 @@ def get_status(account_id: int) -> Optional[dict]:
 def is_running(account_id: int) -> bool:
     task = _TASKS.get(account_id)
     return task is not None and not task.done()
-
-
-async def _resolve_proxy_url(db, account: IkariamAccount) -> Optional[str]:
-    if not account.proxy_id:
-        return None
-    result = await db.execute(select(Proxy).where(Proxy.id == account.proxy_id))
-    proxy = result.scalar_one_or_none()
-    return proxy.url if proxy else None
-
-
-def _seconds_until_window(start_hour: int, end_hour: int, now: Optional[datetime] = None) -> int:
-    """Seconds to wait until inside the operation window; 0 if already inside.
-
-    Supports windows that wrap past midnight (e.g. start=22, end=6).
-    """
-    now = now or datetime.now()
-    if start_hour == end_hour:
-        return 0  # no restriction (24h)
-    h = now.hour + now.minute / 60 + now.second / 3600
-    if start_hour < end_hour:
-        inside = start_hour <= h < end_hour
-    else:  # wraps midnight
-        inside = h >= start_hour or h < end_hour
-    if inside:
-        return 0
-    # Compute seconds until the next occurrence of start_hour.
-    target = now.replace(hour=int(start_hour) % 24, minute=0, second=0, microsecond=0)
-    delta = (target - now).total_seconds()
-    if delta <= 0:
-        delta += 24 * 3600
-    return int(delta)
-
-
-def _compute_wait(base_wait: int, extra_wait_max: int) -> int:
-    """Human-like wait between missions.
-
-    - base mission duration
-    - a uniform random extra (0..extra_wait_max) chosen by the user
-    - a small always-on jitter so intervals are never identical/robotic
-    - a ~12% chance of a longer "coffee break" (2-8 min) to look human
-    """
-    wait_s = base_wait + random.randint(0, max(0, extra_wait_max))
-    wait_s += random.randint(5, 45)  # always-on jitter
-    if random.random() < 0.12:
-        wait_s += random.randint(120, 480)  # occasional longer break
-    return wait_s
 
 
 async def _run_loop(
@@ -112,7 +68,7 @@ async def _run_loop(
 
                 # Respect the account's operation hours: outside the window, the
                 # bot stays idle (a normal player doesn't grind 24/7).
-                wait_window = _seconds_until_window(
+                wait_window = seconds_until_window(
                     account.operation_start_hour, account.operation_end_hour
                 )
                 if wait_window > 0:
@@ -139,7 +95,7 @@ async def _run_loop(
                     status["state"] = "error"
                     status["message"] = "Conta nao encontrada."
                     return
-                proxy_url = await _resolve_proxy_url(db, account)
+                proxy_url = await resolve_proxy_url(db, account)
                 service = GameActionService(account=account, db=db, proxy_url=proxy_url)
                 try:
                     result = await service.start_piracy(city_id, mission_level)
@@ -159,7 +115,7 @@ async def _run_loop(
             if status["runs_done"] >= runs:
                 break
 
-            wait_s = _compute_wait(base_wait, extra_wait_max)
+            wait_s = human_wait(base_wait, extra_wait_max)
             status["next_run_at"] = time.time() + wait_s
             status["message"] = (
                 f"Missao {status['runs_done']}/{runs} iniciada. "

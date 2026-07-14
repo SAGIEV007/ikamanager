@@ -125,7 +125,20 @@ class GameActionService:
             finally:
                 await session.close()
 
-    async def donate(self, city_id, resource_type: str, amount: int) -> dict:
+    async def donate(
+        self,
+        city_id,
+        resource_type: str,
+        amount: int = 0,
+        percent: int = 0,
+    ) -> dict:
+        """Donate resources to the city's island.
+
+        ``resource_type`` is ``"wood"`` (forest) or ``"tradegood"`` (luxury).
+        When ``percent`` > 0 the amount is computed as that percentage of the
+        currently stored resource, so a recurring donation never fails for
+        lack of resources (it just donates what is available).
+        """
         async with account_locks.get_lock(self.account.id):
             session = await self._open_session()
             try:
@@ -134,19 +147,61 @@ class GameActionService:
                 island_id = detail.get("islandId", "")
                 if not island_id:
                     return {"status": "failed", "message": "Ilha da cidade nao encontrada."}
-                resp = await session.donate(city_id, island_id, resource_type, amount)
+
+                donate_amount = int(amount)
+                if percent > 0:
+                    available = await self._available_resource(
+                        session, city_id, resource_type, detail
+                    )
+                    donate_amount = int(available * min(percent, 100) / 100)
+
+                if donate_amount <= 0:
+                    return {
+                        "status": "skipped",
+                        "message": "Nada a doar (recurso insuficiente).",
+                    }
+
+                resp = await session.donate(
+                    city_id, island_id, resource_type, donate_amount
+                )
                 success = session.action_succeeded(resp)
                 self.account.last_action = datetime.utcnow()
                 await self.db.commit()
                 return {
                     "status": "success" if success else "failed",
+                    "amount": donate_amount,
                     "message": (
-                        f"Doacao de {amount} de {resource_type} "
+                        f"Doacao de {donate_amount} de {resource_type} "
                         + ("realizada." if success else "falhou.")
                     ),
                 }
             finally:
                 await session.close()
+
+    # tradegood index (from the city list) -> stored-resource name
+    _TRADEGOOD_TO_RESOURCE = {"1": "wine", "2": "marble", "3": "crystal", "4": "sulfur"}
+
+    async def _available_resource(
+        self, session: IkariamSession, city_id, resource_type: str, detail: dict
+    ) -> int:
+        """How much of the donatable resource the city currently stores."""
+        resources = detail.get("resources", {}) or {}
+        if resource_type == "wood":
+            return int(resources.get("wood", 0))
+        # Luxury: figure out which good this city produces from the city list.
+        try:
+            cities = await session.get_cities()
+        except GameSessionError:
+            cities = []
+        tradegood = ""
+        for c in cities:
+            if str(c.get("id")) == str(city_id):
+                tradegood = str(c.get("tradegood", ""))
+                break
+        res_name = self._TRADEGOOD_TO_RESOURCE.get(tradegood)
+        if not res_name:
+            return 0
+        return int(resources.get(res_name, 0))
 
     async def upgrade_building(self, city_id, position: int) -> dict:
         async with account_locks.get_lock(self.account.id):
@@ -176,6 +231,66 @@ class GameActionService:
                     "status": "success" if success else "failed",
                     "message": (
                         f"Melhoria de {building['name']} (pos {position}) "
+                        + ("iniciada." if success else "falhou.")
+                    ),
+                }
+            finally:
+                await session.close()
+
+    async def upgrade_next(self, city_id, position: Optional[int] = None) -> dict:
+        """Upgrade one building in a city.
+
+        If ``position`` is given, upgrade that building. Otherwise pick the
+        lowest-level building that reports ``canUpgrade`` and isn't already
+        under construction. Returns ``status="skipped"`` when nothing can be
+        upgraded right now (e.g. not enough resources / already building).
+        """
+        async with account_locks.get_lock(self.account.id):
+            session = await self._open_session()
+            try:
+                await session.get_action_token()
+                detail = await session.get_city(city_id)
+                positions = detail.get("positions", [])
+
+                target = None
+                if position is not None:
+                    if 0 <= position < len(positions):
+                        b = positions[position]
+                        if b["building"] != "empty":
+                            target = b
+                else:
+                    candidates = [
+                        b
+                        for b in positions
+                        if b["building"] != "empty"
+                        and not b.get("isBusy")
+                        and not b.get("isMaxLevel")
+                        and b.get("canUpgrade")
+                    ]
+                    candidates.sort(key=lambda b: (b.get("level") or 0))
+                    if candidates:
+                        target = candidates[0]
+
+                if target is None:
+                    return {
+                        "status": "skipped",
+                        "message": "Nenhum edificio disponivel para melhorar agora.",
+                    }
+
+                resp = await session.upgrade_building(
+                    city_id=city_id,
+                    position=target["position"],
+                    level=target["level"],
+                    building_type=target["building"],
+                )
+                success = session.action_succeeded(resp)
+                self.account.last_action = datetime.utcnow()
+                await self.db.commit()
+                return {
+                    "status": "success" if success else "failed",
+                    "position": target["position"],
+                    "message": (
+                        f"Melhoria de {target['name']} (pos {target['position']}) "
                         + ("iniciada." if success else "falhou.")
                     ),
                 }

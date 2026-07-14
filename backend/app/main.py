@@ -41,6 +41,7 @@ app.add_middleware(
 
 # Include API routers
 app.include_router(accounts.router)
+app.include_router(accounts.bulk_router)
 app.include_router(proxies.router)
 app.include_router(automation.router)
 app.include_router(websocket.router)

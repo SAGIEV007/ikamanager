@@ -1,7 +1,11 @@
+from datetime import datetime, timezone
+from urllib.parse import quote
+
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float
 from sqlalchemy.orm import relationship
-from datetime import datetime, timezone
+
 from app.database import Base
+from app.utils.crypto import decrypt_password
 
 
 class Proxy(Base):
@@ -33,5 +37,11 @@ class Proxy(Base):
     def url(self) -> str:
         auth = ""
         if self.username:
-            auth = f"{self.username}:{self.password_encrypted}@"
+            password = ""
+            if self.password_encrypted:
+                try:
+                    password = decrypt_password(self.password_encrypted)
+                except Exception:  # noqa: BLE001 - fall back to raw if not encrypted
+                    password = self.password_encrypted
+            auth = f"{quote(self.username, safe='')}:{quote(password, safe='')}@"
         return f"{self.protocol}://{auth}{self.host}:{self.port}"

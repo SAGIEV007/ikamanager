@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 
@@ -17,10 +17,13 @@ from app.services.ikariam.game_actions import GameActionService, serialize_sessi
 from app.services.ikariam.session import GameSessionError
 from app.services.ikariam.captcha import CaptchaError
 from app.services.ikariam import auto_piracy
+from app.services.ikariam import auto_resources
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
+# Separate prefix so multi-account paths never collide with /{account_id}/... .
+bulk_router = APIRouter(prefix="/api/bulk", tags=["bulk"])
 
 
 def _find_server_name(servers: list, number: int, language: str) -> str:
@@ -339,7 +342,8 @@ async def _get_proxy_url(account: IkariamAccount, db: AsyncSession) -> Optional[
 class DonateRequest(BaseModel):
     city_id: str
     resource_type: str = "wood"  # "wood" (forest) or "tradegood" (luxury)
-    amount: int = 0
+    amount: int = Field(default=0, ge=0)
+    percent: int = Field(default=0, ge=0, le=100)  # % of stored resource if > 0
 
 
 class BuildRequest(BaseModel):
@@ -357,6 +361,49 @@ class AutoPiracyRequest(BaseModel):
     mission_level: int = 1
     runs: int = 10
     extra_wait_max: int = 30  # extra random seconds added after each mission
+
+
+class AutoDonateRequest(BaseModel):
+    city_id: str
+    resource_type: str = "wood"  # "wood" (forest) or "tradegood" (luxury)
+    amount: int = Field(default=0, ge=0)
+    percent: int = Field(default=0, ge=0, le=100)  # % of stored resource each cycle
+    interval_minutes: int = Field(default=30, ge=1)
+    extra_wait_max: int = Field(default=60, ge=0)
+    runs: int = Field(default=0, ge=0)  # 0 = infinite (until stopped)
+
+
+class AutoUpgradeRequest(BaseModel):
+    city_id: str
+    position: Optional[int] = None  # None = auto-pick lowest upgradable building
+    interval_minutes: int = Field(default=20, ge=1)
+    extra_wait_max: int = Field(default=60, ge=0)
+    runs: int = Field(default=0, ge=0)  # 0 = infinite (until stopped)
+
+
+class BulkDonateRequest(BaseModel):
+    account_ids: list[int] = Field(default_factory=list)
+    # If empty, each account's main (first own) city is resolved automatically.
+    city_id: str = ""
+    resource_type: str = "wood"
+    amount: int = Field(default=0, ge=0)
+    percent: int = Field(default=0, ge=0, le=100)
+    interval_minutes: int = Field(default=30, ge=1)
+    extra_wait_max: int = Field(default=60, ge=0)
+    runs: int = Field(default=0, ge=0)
+
+
+class BulkUpgradeRequest(BaseModel):
+    account_ids: list[int] = Field(default_factory=list)
+    city_id: str = ""  # empty = each account's main city
+    position: Optional[int] = None
+    interval_minutes: int = Field(default=20, ge=1)
+    extra_wait_max: int = Field(default=60, ge=0)
+    runs: int = Field(default=0, ge=0)
+
+
+class BulkStopRequest(BaseModel):
+    account_ids: list[int] = Field(default_factory=list)
 
 
 @router.get("/{account_id}/cities")
@@ -449,6 +496,7 @@ async def donate_resources(
             city_id=data.city_id,
             resource_type=data.resource_type,
             amount=data.amount,
+            percent=data.percent,
         )
     except GameSessionError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -555,3 +603,207 @@ async def auto_piracy_status(account_id: int):
         "running": auto_piracy.is_running(account_id),
         "detail": auto_piracy.get_status(account_id),
     }
+
+
+# ---------------------------------------------------------------------------
+# Recurring resource tasks: auto-donate and auto-upgrade (per account)
+# ---------------------------------------------------------------------------
+
+
+async def _require_online_account(account_id: int, db: AsyncSession) -> IkariamAccount:
+    result = await db.execute(
+        select(IkariamAccount).where(IkariamAccount.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if not account.is_online:
+        raise HTTPException(status_code=400, detail="Conta offline. Faca login primeiro.")
+    return account
+
+
+@router.post("/{account_id}/donate/auto/start")
+async def start_auto_donate(
+    account_id: int, data: AutoDonateRequest, db: AsyncSession = Depends(get_db)
+):
+    """Start recurring donations to the island for this account."""
+    await _require_online_account(account_id, db)
+    try:
+        status = auto_resources.start_donate(
+            account_id=account_id,
+            city_id=data.city_id,
+            resource_type=data.resource_type,
+            amount=data.amount,
+            percent=data.percent,
+            interval_minutes=data.interval_minutes,
+            extra_wait_max=data.extra_wait_max,
+            runs=data.runs,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"status": "started", "detail": status}
+
+
+@router.post("/{account_id}/donate/auto/stop")
+async def stop_auto_donate(account_id: int):
+    """Stop the recurring donation loop for this account."""
+    await auto_resources.stop("donate", account_id)
+    return {"status": "stopped", "detail": auto_resources.get_status("donate", account_id)}
+
+
+@router.get("/{account_id}/donate/auto/status")
+async def auto_donate_status(account_id: int):
+    return {
+        "running": auto_resources.is_running("donate", account_id),
+        "detail": auto_resources.get_status("donate", account_id),
+    }
+
+
+@router.post("/{account_id}/upgrade/auto/start")
+async def start_auto_upgrade(
+    account_id: int, data: AutoUpgradeRequest, db: AsyncSession = Depends(get_db)
+):
+    """Start recurring building upgrades for this account."""
+    await _require_online_account(account_id, db)
+    try:
+        status = auto_resources.start_upgrade(
+            account_id=account_id,
+            city_id=data.city_id,
+            position=data.position,
+            interval_minutes=data.interval_minutes,
+            extra_wait_max=data.extra_wait_max,
+            runs=data.runs,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"status": "started", "detail": status}
+
+
+@router.post("/{account_id}/upgrade/auto/stop")
+async def stop_auto_upgrade(account_id: int):
+    """Stop the recurring upgrade loop for this account."""
+    await auto_resources.stop("upgrade", account_id)
+    return {"status": "stopped", "detail": auto_resources.get_status("upgrade", account_id)}
+
+
+@router.get("/{account_id}/upgrade/auto/status")
+async def auto_upgrade_status(account_id: int):
+    return {
+        "running": auto_resources.is_running("upgrade", account_id),
+        "detail": auto_resources.get_status("upgrade", account_id),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Multi-account (bulk) controls
+# ---------------------------------------------------------------------------
+
+
+async def _runnable_accounts(
+    account_ids: list[int], db: AsyncSession
+) -> tuple[list[IkariamAccount], list[dict]]:
+    """Split requested ids into online account objects and skipped-with-reason."""
+    runnable: list[IkariamAccount] = []
+    skipped: list[dict] = []
+    for aid in account_ids:
+        acc = (
+            await db.execute(select(IkariamAccount).where(IkariamAccount.id == aid))
+        ).scalar_one_or_none()
+        if acc is None:
+            skipped.append({"account_id": aid, "reason": "nao encontrada"})
+        elif not acc.is_online:
+            skipped.append({"account_id": aid, "reason": "offline"})
+        else:
+            runnable.append(acc)
+    return runnable, skipped
+
+
+async def _resolve_city_id(
+    account: IkariamAccount, given_city_id: str, db: AsyncSession
+) -> Optional[str]:
+    """Use the given city id, or auto-resolve the account's first own city."""
+    if given_city_id:
+        return given_city_id
+    proxy_url = await _get_proxy_url(account, db)
+    service = GameActionService(account=account, db=db, proxy_url=proxy_url)
+    cities = await service.get_cities()
+    for c in cities:
+        if c.get("relationship") == "ownCity":
+            return c["id"]
+    return None
+
+
+@bulk_router.post("/donate/auto/start")
+async def bulk_start_donate(data: BulkDonateRequest, db: AsyncSession = Depends(get_db)):
+    """Start recurring donations across many accounts at once."""
+    runnable, skipped = await _runnable_accounts(data.account_ids, db)
+    started, errors = [], list(skipped)
+    for acc in runnable:
+        try:
+            city_id = await _resolve_city_id(acc, data.city_id, db)
+            if not city_id:
+                errors.append({"account_id": acc.id, "reason": "sem cidade propria"})
+                continue
+            auto_resources.start_donate(
+                account_id=acc.id,
+                city_id=city_id,
+                resource_type=data.resource_type,
+                amount=data.amount,
+                percent=data.percent,
+                interval_minutes=data.interval_minutes,
+                extra_wait_max=data.extra_wait_max,
+                runs=data.runs,
+            )
+            started.append(acc.id)
+        except ValueError as e:
+            errors.append({"account_id": acc.id, "reason": str(e)})
+        except Exception as e:  # noqa: BLE001 - surface per-account failures
+            errors.append({"account_id": acc.id, "reason": str(e)})
+    return {"started": started, "skipped": errors}
+
+
+@bulk_router.post("/upgrade/auto/start")
+async def bulk_start_upgrade(data: BulkUpgradeRequest, db: AsyncSession = Depends(get_db)):
+    """Start recurring building upgrades across many accounts at once."""
+    runnable, skipped = await _runnable_accounts(data.account_ids, db)
+    started, errors = [], list(skipped)
+    for acc in runnable:
+        try:
+            city_id = await _resolve_city_id(acc, data.city_id, db)
+            if not city_id:
+                errors.append({"account_id": acc.id, "reason": "sem cidade propria"})
+                continue
+            auto_resources.start_upgrade(
+                account_id=acc.id,
+                city_id=city_id,
+                position=data.position,
+                interval_minutes=data.interval_minutes,
+                extra_wait_max=data.extra_wait_max,
+                runs=data.runs,
+            )
+            started.append(acc.id)
+        except ValueError as e:
+            errors.append({"account_id": acc.id, "reason": str(e)})
+        except Exception as e:  # noqa: BLE001 - surface per-account failures
+            errors.append({"account_id": acc.id, "reason": str(e)})
+    return {"started": started, "skipped": errors}
+
+
+@bulk_router.post("/donate/auto/stop")
+async def bulk_stop_donate(data: BulkStopRequest):
+    for aid in data.account_ids:
+        await auto_resources.stop("donate", aid)
+    return {"stopped": data.account_ids}
+
+
+@bulk_router.post("/upgrade/auto/stop")
+async def bulk_stop_upgrade(data: BulkStopRequest):
+    for aid in data.account_ids:
+        await auto_resources.stop("upgrade", aid)
+    return {"stopped": data.account_ids}
+
+
+@bulk_router.get("/resources/status")
+async def bulk_resources_status():
+    """Status of every running recurring donation/upgrade task, all accounts."""
+    return {"tasks": auto_resources.status_all()}
