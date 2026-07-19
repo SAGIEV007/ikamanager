@@ -142,6 +142,8 @@ export const accountsApi = {
   login: (id: number, gfToken?: string) =>
     api.post(`/accounts/${id}/login`, { blackbox: getBlackbox(), gf_token: gfToken || '' }),
   logout: (id: number) => api.post(`/accounts/${id}/logout`),
+  verifySession: (id: number) =>
+    api.post<SessionCheck>(`/accounts/${id}/session/check`),
   getCities: (id: number) => api.get<{ cities: City[] }>(`/accounts/${id}/cities`),
   getGameData: (id: number) => api.get<{ cities: CityDetail[] }>(`/accounts/${id}/game-data`),
   getCity: (id: number, cityId: string) => api.get<CityDetail>(`/accounts/${id}/city/${cityId}`),
@@ -224,7 +226,17 @@ export interface ResourceTaskStatus {
   config?: Record<string, unknown>;
 }
 
+export interface SessionCheck {
+  online: boolean;
+  status: string;
+  message: string;
+}
+
 export const bulkApi = {
+  verify: (accountIds: number[] = []) =>
+    api.post<{ checked: (SessionCheck & { account_id: number })[] }>('/bulk/verify', {
+      account_ids: accountIds,
+    }),
   startDonate: (accountIds: number[], cfg: AutoDonateConfig) =>
     api.post('/bulk/donate/auto/start', { account_ids: accountIds, ...cfg }),
   stopDonate: (accountIds: number[]) =>

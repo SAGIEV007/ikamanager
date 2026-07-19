@@ -112,6 +112,42 @@ async def _deactivate_job(kind: str, account_id: int) -> None:
         logger.exception("Falha ao desativar job %s da conta %s", kind, account_id)
 
 
+# How long to wait before re-checking the session after it expired. The loop
+# stays alive during this time so it resumes automatically once the user logs
+# in again (no app restart needed).
+SESSION_RETRY_S = 120
+
+
+async def _set_account_session_state(
+    account_id: int, online: bool, status: str, message: str
+) -> None:
+    """Update the account's session status from inside a runner loop."""
+    try:
+        async with async_session() as db:
+            account = (
+                await db.execute(
+                    select(IkariamAccount).where(IkariamAccount.id == account_id)
+                )
+            ).scalar_one_or_none()
+            if account is None:
+                return
+            # Only write when something actually changed (avoids churn).
+            if (
+                account.is_online == online
+                and account.status == status
+                and account.status_message == message
+            ):
+                return
+            account.is_online = online
+            account.status = status
+            account.status_message = message
+            if not online:
+                account.session_cookie = None
+            await db.commit()
+    except Exception:  # noqa: BLE001 - status sync must never break the loop
+        logger.exception("Falha ao atualizar status da conta %s", account_id)
+
+
 async def _perform(kind: str, account_id: int, config: dict) -> dict:
     """Run one action of the given kind and return its result dict."""
     async with async_session() as db:
@@ -179,15 +215,32 @@ async def _run_loop(kind: str, account_id: int, config: dict) -> None:
             try:
                 result = await _perform(kind, account_id, config)
             except GameSessionError as e:
-                status["state"] = "stopped"
-                status["message"] = str(e)
-                return
+                # Session expired (e.g. the player logged in elsewhere). Keep
+                # the task alive and retry: it will resume by itself once the
+                # user logs in again, without restarting the app.
+                await _set_account_session_state(
+                    account_id, False, "session_expired", str(e)
+                )
+                status["state"] = "waiting_login"
+                status["next_run_at"] = time.time() + SESSION_RETRY_S
+                status["message"] = (
+                    f"Sessao expirada: {e} "
+                    f"Retomo sozinho apos voce relogar (checo a cada "
+                    f"~{SESSION_RETRY_S // 60}min)."
+                )
+                await asyncio.sleep(SESSION_RETRY_S)
+                status["state"] = "running"
+                continue
             except Exception as e:  # noqa: BLE001 - surface unexpected errors
                 status["state"] = "error"
                 status["message"] = f"Erro: {e}"
                 logger.exception("Auto-%s falhou para conta %s", kind, account_id)
                 return
 
+            # A successful action proves the session works again.
+            await _set_account_session_state(
+                account_id, True, "online", "Sessao ativa."
+            )
             status["runs_done"] += 1
             status["last_result"] = result.get("status")
             status["last_message"] = result.get("message", "")

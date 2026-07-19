@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react';
-import { Plus, Trash2, LogIn, LogOut, RefreshCw, MapPin, ChevronDown, ChevronRight } from 'lucide-react';
+import { Plus, Trash2, LogIn, LogOut, RefreshCw, MapPin, ChevronDown, ChevronRight, ShieldCheck } from 'lucide-react';
 import { useStore } from '../stores/useStore';
 import { accountsApi, proxiesApi, bulkApi } from '../services/api';
 import type {
@@ -18,9 +18,16 @@ export function Accounts() {
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyingId, setVerifyingId] = useState<number | null>(null);
 
   useEffect(() => {
     loadData();
+    // Light refresh from our own DB (no game requests) so statuses updated by
+    // the background tasks — like "session expired" — show up quickly instead
+    // of arriving late.
+    const t = setInterval(() => loadAccountsOnly(), 8000);
+    return () => clearInterval(t);
   }, []);
 
   const loadData = async () => {
@@ -35,6 +42,44 @@ export function Accounts() {
       console.error('Failed to load accounts:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadAccountsOnly = async () => {
+    try {
+      const res = await accountsApi.list();
+      setAccounts(res.data);
+    } catch {
+      // ignore transient refresh errors
+    }
+  };
+
+  // Ask the server to actually confirm each session against the game and sync
+  // the real status. This is the honest check (vs. trusting a stale "online").
+  const verifyAll = async () => {
+    setVerifying(true);
+    setActionMessage('Verificando sessões reais das contas...');
+    try {
+      await bulkApi.verify([]);
+      await loadAccountsOnly();
+      setActionMessage('Sessões verificadas.');
+    } catch {
+      setActionMessage('Falha ao verificar sessões.');
+    } finally {
+      setVerifying(false);
+      setTimeout(() => setActionMessage(null), 4000);
+    }
+  };
+
+  const verifyOne = async (id: number) => {
+    setVerifyingId(id);
+    try {
+      await accountsApi.verifySession(id);
+      await loadAccountsOnly();
+    } catch {
+      setActionMessage('Falha ao verificar a sessão desta conta.');
+    } finally {
+      setVerifyingId(null);
     }
   };
 
@@ -127,13 +172,24 @@ export function Accounts() {
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-slate-100">Contas</h1>
-        <button
-          onClick={() => setShowAddForm(true)}
-          className="flex items-center gap-2 bg-purple-700 hover:bg-purple-600 text-white px-4 py-2 rounded-lg text-sm transition"
-        >
-          <Plus className="w-4 h-4" />
-          Adicionar Conta
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={verifyAll}
+            disabled={verifying}
+            className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-2 rounded-lg text-sm transition disabled:opacity-50"
+            title="Confirma quais contas estão realmente logadas no jogo agora"
+          >
+            <ShieldCheck className={`w-4 h-4 ${verifying ? 'animate-pulse' : ''}`} />
+            {verifying ? 'Verificando...' : 'Verificar sessões'}
+          </button>
+          <button
+            onClick={() => setShowAddForm(true)}
+            className="flex items-center gap-2 bg-purple-700 hover:bg-purple-600 text-white px-4 py-2 rounded-lg text-sm transition"
+          >
+            <Plus className="w-4 h-4" />
+            Adicionar Conta
+          </button>
+        </div>
       </div>
 
       {/* Status message */}
@@ -253,6 +309,16 @@ export function Accounts() {
                           )}
                         </button>
                       )}
+                      <button
+                        onClick={() => verifyOne(account.id)}
+                        disabled={verifyingId === account.id}
+                        className="p-1.5 rounded text-sky-300 hover:bg-sky-900/30 transition disabled:opacity-50"
+                        title="Verificar se esta conta está realmente logada no jogo agora"
+                      >
+                        <ShieldCheck
+                          className={`w-4 h-4 ${verifyingId === account.id ? 'animate-pulse' : ''}`}
+                        />
+                      </button>
                       <button
                         onClick={() => handleDelete(account.id)}
                         className="p-1.5 rounded text-red-400 hover:bg-red-900/30 transition"
@@ -549,6 +615,7 @@ function summarizeTask(t: ResourceTaskStatus): string {
 const STATE_STYLES: Record<string, { label: string; cls: string }> = {
   running: { label: 'Rodando', cls: 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50' },
   waiting_hours: { label: 'Fora do horário', cls: 'bg-amber-900/40 text-amber-300 border-amber-700/50' },
+  waiting_login: { label: 'Aguardando login', cls: 'bg-sky-900/40 text-sky-300 border-sky-700/50' },
   error: { label: 'Erro', cls: 'bg-red-900/40 text-red-300 border-red-700/50' },
   done: { label: 'Concluído', cls: 'bg-slate-700/40 text-slate-300 border-slate-600/50' },
   stopped: { label: 'Parado', cls: 'bg-slate-700/40 text-slate-400 border-slate-600/50' },
@@ -1601,18 +1668,26 @@ function ProxySelect({
   );
 }
 
+const STATUS_META: Record<string, { bg: string; text: string; label: string }> = {
+  online: { bg: 'bg-green-900/40', text: 'text-green-400', label: 'Online' },
+  offline: { bg: 'bg-slate-700/40', text: 'text-slate-400', label: 'Offline' },
+  error: { bg: 'bg-red-900/40', text: 'text-red-400', label: 'Erro' },
+  session_expired: {
+    bg: 'bg-amber-900/40',
+    text: 'text-amber-300',
+    label: 'Sessão expirada — relogar',
+  },
+  checking: { bg: 'bg-sky-900/40', text: 'text-sky-300', label: 'Verificando…' },
+  captcha: { bg: 'bg-amber-900/40', text: 'text-amber-300', label: 'Captcha' },
+};
+
 function StatusBadge({ status, message }: { status: string; message: string | null }) {
-  const statusMap: Record<string, { bg: string; text: string }> = {
-    online: { bg: 'bg-green-900/40', text: 'text-green-400' },
-    offline: { bg: 'bg-slate-700/40', text: 'text-slate-400' },
-    error: { bg: 'bg-red-900/40', text: 'text-red-400' },
-  };
-  const style = statusMap[status] || statusMap.offline;
+  const meta = STATUS_META[status] || STATUS_META.offline;
 
   return (
     <div>
-      <span className={`px-2 py-0.5 rounded text-xs font-medium ${style.bg} ${style.text}`}>
-        {status}
+      <span className={`px-2 py-0.5 rounded text-xs font-medium ${meta.bg} ${meta.text}`}>
+        {meta.label}
       </span>
       {message && <p className="text-xs text-slate-500 mt-1 truncate max-w-[250px]">{message}</p>}
     </div>

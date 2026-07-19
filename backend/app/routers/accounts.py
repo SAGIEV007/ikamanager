@@ -451,9 +451,39 @@ async def get_game_data(account_id: int, db: AsyncSession = Depends(get_db)):
     try:
         return await game_service.get_full_game_data()
     except GameSessionError as e:
+        # The session is dead: reflect that in the account status so the UI
+        # stops showing a misleading "online".
+        account.is_online = False
+        account.status = "session_expired"
+        account.status_message = str(e)
+        account.session_cookie = None
+        await db.commit()
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
+
+
+@router.post("/{account_id}/session/check")
+async def check_account_session(
+    account_id: int, db: AsyncSession = Depends(get_db)
+):
+    """Verify whether the stored game session still works and sync the status.
+
+    Returns ``{online, status, message}``. This is the honest, real-time
+    check the UI uses instead of trusting a stale ``online`` flag.
+    """
+    result = await db.execute(
+        select(IkariamAccount).where(IkariamAccount.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    proxy_url = await _get_proxy_url(account, db)
+    game_service = GameActionService(account=account, db=db, proxy_url=proxy_url)
+    try:
+        return await game_service.verify_session()
+    except Exception as e:  # noqa: BLE001 - report but never 500 the UI check
+        return {"online": False, "status": "error", "message": f"Erro: {e}"}
 
 
 @router.get("/{account_id}/city/{city_id}")
@@ -812,3 +842,35 @@ async def bulk_stop_upgrade(data: BulkStopRequest):
 async def bulk_resources_status():
     """Status of every running recurring donation/upgrade task, all accounts."""
     return {"tasks": auto_resources.status_all()}
+
+
+@bulk_router.post("/verify")
+async def bulk_verify_sessions(
+    data: BulkStopRequest, db: AsyncSession = Depends(get_db)
+):
+    """Verify the real session state of several accounts and sync statuses.
+
+    If ``account_ids`` is empty, every account currently marked online is
+    checked (to catch stale "online" flags). Checks run one at a time to
+    avoid a burst of near-simultaneous requests.
+    """
+    if data.account_ids:
+        result = await db.execute(
+            select(IkariamAccount).where(IkariamAccount.id.in_(data.account_ids))
+        )
+    else:
+        result = await db.execute(
+            select(IkariamAccount).where(IkariamAccount.is_online.is_(True))
+        )
+    accounts = result.scalars().all()
+
+    checked = []
+    for account in accounts:
+        proxy_url = await _get_proxy_url(account, db)
+        service = GameActionService(account=account, db=db, proxy_url=proxy_url)
+        try:
+            res = await service.verify_session()
+        except Exception as e:  # noqa: BLE001 - one failure must not stop the rest
+            res = {"online": False, "status": "error", "message": f"Erro: {e}"}
+        checked.append({"account_id": account.id, **res})
+    return {"checked": checked}

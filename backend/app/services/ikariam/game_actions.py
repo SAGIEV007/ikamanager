@@ -147,6 +147,42 @@ class GameActionService:
             finally:
                 await session.close()
 
+    async def verify_session(self) -> dict:
+        """Check whether the stored game session is really usable *right now*
+        and update the account's status to reflect reality.
+
+        This is what makes the UI honest: an account can show ``online`` only
+        because it logged in once, even though the session has since expired
+        (e.g. the player logged in from their phone). A light request to the
+        game confirms the truth and flips the status to ``session_expired``
+        when the cookie no longer works.
+        """
+        async with account_locks.get_lock(self.account.id):
+            try:
+                session = await self._open_session()
+            except GameSessionError as e:
+                return await self._set_session_status(False, "session_expired", str(e))
+            try:
+                await session.get_cities()
+            except GameSessionError as e:
+                return await self._set_session_status(False, "session_expired", str(e))
+            finally:
+                await session.close()
+            return await self._set_session_status(True, "online", "Sessao ativa.")
+
+    async def _set_session_status(
+        self, online: bool, status: str, message: str
+    ) -> dict:
+        self.account.is_online = online
+        self.account.status = status
+        self.account.status_message = message
+        if not online:
+            # A dead session cookie is useless; drop it so the UI clearly
+            # requires a fresh login.
+            self.account.session_cookie = None
+        await self.db.commit()
+        return {"online": online, "status": status, "message": message}
+
     async def get_full_game_data(self) -> dict:
         """List cities and load detail for each own city."""
         async with account_locks.get_lock(self.account.id):
