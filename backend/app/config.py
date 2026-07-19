@@ -5,6 +5,9 @@ from functools import lru_cache
 class Settings(BaseSettings):
     app_name: str = "IkaManager"
     debug: bool = True
+    # Echo every SQL statement to the console. Off by default: it floods the
+    # terminal and makes real messages hard to spot. Enable only for debugging.
+    sql_echo: bool = False
     database_url: str = "sqlite+aiosqlite:///./ikamanager.db"
     secret_key: str = "change-this-in-production-use-a-real-secret-key"
     encryption_key: str = "change-this-32-byte-key-for-prod!"

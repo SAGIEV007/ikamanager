@@ -28,6 +28,8 @@ export interface IkariamAccount {
   proxy_id: number | null;
   delay_min: number;
   delay_max: number;
+  operation_start_hour: number;
+  operation_end_hour: number;
   created_at: string;
 }
 

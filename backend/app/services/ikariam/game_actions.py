@@ -21,6 +21,52 @@ from app.services import app_settings
 
 logger = logging.getLogger(__name__)
 
+# Growth-focused upgrade priority (Level-1 autopilot). Buildings earlier in the
+# list are preferred when several are eligible at the same level, so the city
+# grows in a healthy order (storage -> population -> satisfaction -> production
+# -> research) instead of blindly bumping whatever is lowest. Keys are the
+# internal Ikariam building identifiers reported by the city parser.
+UPGRADE_PRIORITY: list[str] = [
+    "warehouse",     # protect stored resources first
+    "townHall",      # population / workers
+    "tavern",        # satisfaction (keeps population growing)
+    "museum",        # culture / satisfaction (needed to expand)
+    "carpentering",  # cheaper wood buildings
+    "architect",     # cheaper marble buildings
+    "vineyard",      # cheaper wine buildings
+    "optician",      # cheaper crystal buildings
+    "fireworker",    # cheaper sulfur buildings
+    "academy",       # research output
+    "forester",      # wood production
+    "stonemason",    # marble production
+    "winegrower",    # wine production
+    "glassblowing",  # crystal production
+    "alchemist",     # sulfur production
+    "port",          # trading port
+    "branchOffice",  # trading post
+]
+_PRIORITY_RANK = {name: i for i, name in enumerate(UPGRADE_PRIORITY)}
+# Military / non-resource buildings: only touched when nothing else is eligible.
+_DEPRIORITIZED = {
+    "barracks",
+    "wall",
+    "shipyard",
+    "embassy",
+    "safehouse",
+    "temple",
+    "dump",
+    "pirateFortress",
+    "marineChamber",
+}
+_DEFAULT_RANK = len(UPGRADE_PRIORITY) + 1
+_DEPRIORITIZED_RANK = _DEFAULT_RANK + 100
+
+
+def _upgrade_rank(building: str) -> int:
+    if building in _DEPRIORITIZED:
+        return _DEPRIORITIZED_RANK
+    return _PRIORITY_RANK.get(building, _DEFAULT_RANK)
+
 
 def serialize_session(gf_token: str, cookies: dict, server_url: str) -> str:
     return json.dumps(
@@ -237,13 +283,20 @@ class GameActionService:
             finally:
                 await session.close()
 
-    async def upgrade_next(self, city_id, position: Optional[int] = None) -> dict:
+    async def upgrade_next(
+        self, city_id, position: Optional[int] = None, prioritized: bool = True
+    ) -> dict:
         """Upgrade one building in a city.
 
-        If ``position`` is given, upgrade that building. Otherwise pick the
-        lowest-level building that reports ``canUpgrade`` and isn't already
-        under construction. Returns ``status="skipped"`` when nothing can be
-        upgraded right now (e.g. not enough resources / already building).
+        If ``position`` is given, upgrade that building. Otherwise pick a
+        building that reports ``canUpgrade`` and isn't already under
+        construction. When ``prioritized`` (Level-1 autopilot) the choice
+        keeps the city balanced but nudges growth toward the important
+        buildings (see ``UPGRADE_PRIORITY``): among all eligible buildings it
+        upgrades the lowest level, breaking ties by priority. When
+        ``prioritized`` is False it falls back to the plain lowest-level pick.
+        Returns ``status="skipped"`` when nothing can be upgraded right now
+        (e.g. not enough resources / already building).
         """
         async with account_locks.get_lock(self.account.id):
             session = await self._open_session()
@@ -267,9 +320,30 @@ class GameActionService:
                         and not b.get("isMaxLevel")
                         and b.get("canUpgrade")
                     ]
-                    candidates.sort(key=lambda b: (b.get("level") or 0))
-                    if candidates:
-                        target = candidates[0]
+                    if prioritized:
+                        # Growth-focused: never spend resources on military /
+                        # non-resource buildings while any resource-oriented
+                        # building can still be upgraded. Among the preferred
+                        # set, keep the city balanced (lowest level first) but
+                        # break ties toward the more important buildings.
+                        preferred = [
+                            b
+                            for b in candidates
+                            if b.get("building", "") not in _DEPRIORITIZED
+                        ]
+                        pool = preferred or candidates
+                        pool.sort(
+                            key=lambda b: (
+                                b.get("level") or 0,
+                                _upgrade_rank(b.get("building", "")),
+                            )
+                        )
+                        if pool:
+                            target = pool[0]
+                    else:
+                        candidates.sort(key=lambda b: (b.get("level") or 0))
+                        if candidates:
+                            target = candidates[0]
 
                 if target is None:
                     return {

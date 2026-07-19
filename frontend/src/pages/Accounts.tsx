@@ -8,6 +8,7 @@ import type {
   AutoPiracyStatus,
   ResourceTaskStatus,
   Proxy,
+  IkariamAccount,
 } from '../services/api';
 
 export function Accounts() {
@@ -262,6 +263,7 @@ export function Accounts() {
                 {expanded === account.id && account.is_online && (
                   <tr className="border-b border-slate-800 bg-slate-900/40">
                     <td colSpan={5} className="p-4">
+                      <OperationHoursControl account={account} />
                       <CityManager accountId={account.id} />
                     </td>
                   </tr>
@@ -552,6 +554,87 @@ function MultiAccountPanel() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function OperationHoursControl({ account }: { account: IkariamAccount }) {
+  const { updateAccount } = useStore();
+  // start == end means "no restriction" (24h). Enabled when they differ.
+  const enabled = account.operation_start_hour !== account.operation_end_hour;
+  const [start, setStart] = useState(String(account.operation_start_hour ?? 0));
+  const [end, setEnd] = useState(String(account.operation_end_hour ?? 0));
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const save = async (s: number, e: number) => {
+    setMsg(null);
+    updateAccount(account.id, { operation_start_hour: s, operation_end_hour: e });
+    try {
+      await accountsApi.update(account.id, {
+        operation_start_hour: s,
+        operation_end_hour: e,
+      });
+    } catch {
+      setMsg('Falha ao salvar horário.');
+    }
+  };
+
+  const toggle = (on: boolean) => {
+    if (!on) {
+      // Disable = 24h (start == end).
+      save(0, 0);
+    } else {
+      // Enable with a sensible default window if currently 24h.
+      const s = 6;
+      const e = 23;
+      setStart(String(s));
+      setEnd(String(e));
+      save(s, e);
+    }
+  };
+
+  return (
+    <div className="bg-slate-800/40 rounded-lg p-3 mb-4">
+      <div className="flex items-center gap-3 flex-wrap">
+        <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => toggle(e.target.checked)}
+          />
+          Limitar horário de operação
+        </label>
+        {enabled ? (
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <span>das</span>
+            <input
+              type="number"
+              min={0}
+              max={23}
+              value={start}
+              onChange={(e) => setStart(e.target.value)}
+              onBlur={() => save(parseInt(start || '0', 10), parseInt(end || '0', 10))}
+              className="w-14 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-slate-200"
+            />
+            <span>h às</span>
+            <input
+              type="number"
+              min={0}
+              max={23}
+              value={end}
+              onChange={(e) => setEnd(e.target.value)}
+              onBlur={() => save(parseInt(start || '0', 10), parseInt(end || '0', 10))}
+              className="w-14 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-slate-200"
+            />
+            <span>h</span>
+          </div>
+        ) : (
+          <span className="text-xs text-slate-500">
+            Sem restrição (roda 24h). Marque para definir uma janela.
+          </span>
+        )}
+        {msg && <span className="text-xs text-red-400">{msg}</span>}
+      </div>
     </div>
   );
 }
@@ -972,8 +1055,8 @@ function AutoDonatePanel({ accountId, cityId }: { accountId: number; cityId: str
         )}
       </div>
       <p className="text-[10px] text-slate-500 mt-1">
-        Doa repetidamente dentro do horário de operação, com tempos aleatórios. "% do estoque"
-        nunca falha por falta de recurso.
+        Doa repetidamente com tempos aleatórios (respeita a janela de horário, se você ativar).
+        "% do estoque" nunca falha por falta de recurso.
       </p>
       {err && <p className="text-xs text-red-400">{err}</p>}
       <TaskStatusLine running={running} detail={detail} />
@@ -1059,8 +1142,9 @@ function AutoUpgradePanel({ accountId, cityId }: { accountId: number; cityId: st
         )}
       </div>
       <p className="text-[10px] text-slate-500 mt-1">
-        A cada ciclo melhora o edifício de menor nível que puder ser melhorado (respeita horário e
-        recursos). Quando não dá, apenas espera o próximo ciclo.
+        A cada ciclo escolhe de forma inteligente o próximo edifício a subir — mantém a cidade
+        equilibrada priorizando depósito, prefeitura, satisfação e produção. Respeita horário e
+        recursos; quando não dá, espera o próximo ciclo.
       </p>
       {err && <p className="text-xs text-red-400">{err}</p>}
       <TaskStatusLine running={running} detail={detail} />

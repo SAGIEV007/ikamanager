@@ -48,6 +48,9 @@ class AccountUpdate(BaseModel):
     group_name: Optional[str] = None
     proxy_id: Optional[int] = None
     is_active: Optional[bool] = None
+    # Operation window (opt-in). start == end means 24h / no restriction.
+    operation_start_hour: Optional[int] = Field(default=None, ge=0, le=23)
+    operation_end_hour: Optional[int] = Field(default=None, ge=0, le=23)
 
 
 class AccountResponse(BaseModel):
@@ -70,6 +73,8 @@ class AccountResponse(BaseModel):
     proxy_id: Optional[int]
     delay_min: float
     delay_max: float
+    operation_start_hour: int
+    operation_end_hour: int
     created_at: datetime
 
     class Config:

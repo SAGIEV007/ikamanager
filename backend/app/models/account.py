@@ -49,5 +49,7 @@ class IkariamAccount(Base):
     delay_min = Column(Float, default=2.0)
     delay_max = Column(Float, default=6.0)
     max_requests_per_minute = Column(Integer, default=20)
-    operation_start_hour = Column(Integer, default=6)
-    operation_end_hour = Column(Integer, default=23)
+    # Operation window is OPT-IN: start == end (default 0/0) means no
+    # restriction (24h). Set different hours to limit when automation runs.
+    operation_start_hour = Column(Integer, default=0)
+    operation_end_hour = Column(Integer, default=0)
