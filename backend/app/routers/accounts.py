@@ -369,21 +369,23 @@ class AutoPiracyRequest(BaseModel):
 
 
 class AutoDonateRequest(BaseModel):
-    city_id: str
+    city_id: str = ""
     resource_type: str = "wood"  # "wood" (forest) or "tradegood" (luxury)
     amount: int = Field(default=0, ge=0)
     percent: int = Field(default=0, ge=0, le=100)  # % of stored resource each cycle
     interval_minutes: int = Field(default=30, ge=1)
     extra_wait_max: int = Field(default=60, ge=0)
     runs: int = Field(default=0, ge=0)  # 0 = infinite (until stopped)
+    all_cities: bool = False  # donate in every own city, not just one
 
 
 class AutoUpgradeRequest(BaseModel):
-    city_id: str
+    city_id: str = ""
     position: Optional[int] = None  # None = auto-pick lowest upgradable building
     interval_minutes: int = Field(default=20, ge=1)
     extra_wait_max: int = Field(default=60, ge=0)
     runs: int = Field(default=0, ge=0)  # 0 = infinite (until stopped)
+    all_cities: bool = False  # upgrade in every own city, not just one
 
 
 class BulkDonateRequest(BaseModel):
@@ -396,6 +398,7 @@ class BulkDonateRequest(BaseModel):
     interval_minutes: int = Field(default=30, ge=1)
     extra_wait_max: int = Field(default=60, ge=0)
     runs: int = Field(default=0, ge=0)
+    all_cities: bool = False  # donate in every own city of each account
 
 
 class BulkUpgradeRequest(BaseModel):
@@ -405,6 +408,7 @@ class BulkUpgradeRequest(BaseModel):
     interval_minutes: int = Field(default=20, ge=1)
     extra_wait_max: int = Field(default=60, ge=0)
     runs: int = Field(default=0, ge=0)
+    all_cities: bool = False  # upgrade in every own city of each account
 
 
 class BulkStopRequest(BaseModel):
@@ -673,6 +677,7 @@ async def start_auto_donate(
             interval_minutes=data.interval_minutes,
             extra_wait_max=data.extra_wait_max,
             runs=data.runs,
+            all_cities=data.all_cities,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -708,6 +713,7 @@ async def start_auto_upgrade(
             interval_minutes=data.interval_minutes,
             extra_wait_max=data.extra_wait_max,
             runs=data.runs,
+            all_cities=data.all_cities,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -775,10 +781,12 @@ async def bulk_start_donate(data: BulkDonateRequest, db: AsyncSession = Depends(
     started, errors = [], list(skipped)
     for acc in runnable:
         try:
-            city_id = await _resolve_city_id(acc, data.city_id, db)
-            if not city_id:
-                errors.append({"account_id": acc.id, "reason": "sem cidade propria"})
-                continue
+            city_id = ""
+            if not data.all_cities:
+                city_id = await _resolve_city_id(acc, data.city_id, db)
+                if not city_id:
+                    errors.append({"account_id": acc.id, "reason": "sem cidade propria"})
+                    continue
             auto_resources.start_donate(
                 account_id=acc.id,
                 city_id=city_id,
@@ -788,6 +796,8 @@ async def bulk_start_donate(data: BulkDonateRequest, db: AsyncSession = Depends(
                 interval_minutes=data.interval_minutes,
                 extra_wait_max=data.extra_wait_max,
                 runs=data.runs,
+                all_cities=data.all_cities,
+                stagger=True,
             )
             started.append(acc.id)
         except ValueError as e:
@@ -804,10 +814,12 @@ async def bulk_start_upgrade(data: BulkUpgradeRequest, db: AsyncSession = Depend
     started, errors = [], list(skipped)
     for acc in runnable:
         try:
-            city_id = await _resolve_city_id(acc, data.city_id, db)
-            if not city_id:
-                errors.append({"account_id": acc.id, "reason": "sem cidade propria"})
-                continue
+            city_id = ""
+            if not data.all_cities:
+                city_id = await _resolve_city_id(acc, data.city_id, db)
+                if not city_id:
+                    errors.append({"account_id": acc.id, "reason": "sem cidade propria"})
+                    continue
             auto_resources.start_upgrade(
                 account_id=acc.id,
                 city_id=city_id,
@@ -815,6 +827,8 @@ async def bulk_start_upgrade(data: BulkUpgradeRequest, db: AsyncSession = Depend
                 interval_minutes=data.interval_minutes,
                 extra_wait_max=data.extra_wait_max,
                 runs=data.runs,
+                all_cities=data.all_cities,
+                stagger=True,
             )
             started.append(acc.id)
         except ValueError as e:

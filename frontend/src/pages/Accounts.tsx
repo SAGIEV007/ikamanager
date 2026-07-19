@@ -357,6 +357,7 @@ function MultiAccountPanel() {
   const [percent, setPercent] = useState('50');
   const [donateInterval, setDonateInterval] = useState('30');
   const [upgradeInterval, setUpgradeInterval] = useState('20');
+  const [allCities, setAllCities] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
 
@@ -387,6 +388,7 @@ function MultiAccountPanel() {
         percent: mode === 'percent' ? parseInt(percent || '0', 10) : 0,
         interval_minutes: parseInt(donateInterval || '30', 10),
         runs: 0,
+        all_cities: allCities,
       });
       report(res.data);
     } catch (e: any) {
@@ -403,6 +405,7 @@ function MultiAccountPanel() {
         position: null,
         interval_minutes: parseInt(upgradeInterval || '20', 10),
         runs: 0,
+        all_cities: allCities,
       });
       report(res.data);
     } catch (e: any) {
@@ -575,10 +578,20 @@ function MultiAccountPanel() {
                   </button>
                 </div>
                 <p className="text-[10px] text-slate-500 mt-1">
-                  Usa a cidade principal de cada conta automaticamente. Para escolher uma cidade
-                  específica, use os controles dentro de cada conta.
+                  {allCities
+                    ? 'Roda em TODAS as cidades de cada conta. As contas iniciam escalonadas (não agem no mesmo minuto).'
+                    : 'Usa só a cidade principal de cada conta. Para uma cidade específica, use os controles dentro da conta.'}
                 </p>
               </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={allCities}
+                  onChange={(e) => setAllCities(e.target.checked)}
+                />
+                Aplicar em todas as cidades de cada conta (recomendado para upar a ilha inteira)
+              </label>
 
               {msg && <p className="text-xs text-blue-300">{msg}</p>}
             </>

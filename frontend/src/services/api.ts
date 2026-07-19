@@ -202,6 +202,7 @@ export interface AutoDonateConfig {
   interval_minutes?: number;
   extra_wait_max?: number;
   runs?: number;
+  all_cities?: boolean;
 }
 
 export interface AutoUpgradeConfig {
@@ -210,6 +211,7 @@ export interface AutoUpgradeConfig {
   interval_minutes?: number;
   extra_wait_max?: number;
   runs?: number;
+  all_cities?: boolean;
 }
 
 export interface ResourceTaskStatus {

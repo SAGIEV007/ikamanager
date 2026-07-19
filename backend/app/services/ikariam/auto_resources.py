@@ -15,6 +15,7 @@ serialization is still enforced by ``account_locks`` inside the service.
 
 import asyncio
 import logging
+import random
 import time
 from typing import Optional
 
@@ -160,6 +161,8 @@ async def _perform(kind: str, account_id: int, config: dict) -> dict:
             raise GameSessionError("Conta nao encontrada.")
         proxy_url = await resolve_proxy_url(db, account)
         service = GameActionService(account=account, db=db, proxy_url=proxy_url)
+        if config.get("all_cities"):
+            return await _perform_all_cities(service, kind, config)
         if kind == "donate":
             return await service.donate(
                 config["city_id"],
@@ -174,6 +177,44 @@ async def _perform(kind: str, account_id: int, config: dict) -> dict:
         raise ValueError(f"Tipo de tarefa desconhecido: {kind}")
 
 
+async def _perform_all_cities(
+    service: GameActionService, kind: str, config: dict
+) -> dict:
+    """Run the action on *every* own city of the account, one after another.
+
+    Used when the account has several cities on the island: a single task
+    keeps them all growing/donating instead of only the main city.
+    """
+    cities = await service.get_cities()
+    own = [c["id"] for c in cities if c.get("relationship") == "ownCity"]
+    if not own:
+        return {"status": "skipped", "message": "Nenhuma cidade propria encontrada."}
+
+    ok = 0
+    parts = []
+    for city_id in own:
+        if kind == "donate":
+            res = await service.donate(
+                city_id,
+                config["resource_type"],
+                amount=config.get("amount", 0),
+                percent=config.get("percent", 0),
+            )
+        elif kind == "upgrade":
+            # position is per-city, so always auto-pick when covering all cities
+            res = await service.upgrade_next(city_id, position=None)
+        else:
+            raise ValueError(f"Tipo de tarefa desconhecido: {kind}")
+        if res.get("status") == "success":
+            ok += 1
+        parts.append(res.get("message", ""))
+
+    return {
+        "status": "success" if ok else "skipped",
+        "message": f"{ok}/{len(own)} cidades: " + " | ".join(p for p in parts if p),
+    }
+
+
 async def _run_loop(kind: str, account_id: int, config: dict) -> None:
     key = _key(kind, account_id)
     status = _STATUS[key]
@@ -183,6 +224,20 @@ async def _run_loop(kind: str, account_id: int, config: dict) -> None:
     # Persist the job so it can be resumed automatically after a restart.
     await _persist_job(kind, account_id, config)
     try:
+        # Stagger the start so several accounts don't all act in the same
+        # minute (a dead giveaway for a bot). Each account waits a random
+        # slice of the interval before its first cycle.
+        if config.get("stagger"):
+            offset = random.randint(0, min(interval, 600))
+            if offset > 0:
+                status["state"] = "waiting_hours"
+                status["next_run_at"] = time.time() + offset
+                status["message"] = (
+                    f"Escalonando inicio (~{offset // 60}min {offset % 60}s) "
+                    "para nao agir junto com as outras contas."
+                )
+                await asyncio.sleep(offset)
+                status["state"] = "running"
         while runs == 0 or status["runs_done"] < runs:
             # Operation-hours window (a normal player doesn't grind 24/7).
             async with async_session() as db:
@@ -301,6 +356,8 @@ def start_donate(
     interval_minutes: int = 30,
     extra_wait_max: int = 60,
     runs: int = 0,
+    all_cities: bool = False,
+    stagger: bool = False,
 ) -> dict:
     return _start(
         "donate",
@@ -313,6 +370,8 @@ def start_donate(
             "interval_s": int(interval_minutes) * 60,
             "extra_wait_max": extra_wait_max,
             "runs": runs,
+            "all_cities": all_cities,
+            "stagger": stagger,
         },
     )
 
@@ -324,6 +383,8 @@ def start_upgrade(
     interval_minutes: int = 20,
     extra_wait_max: int = 60,
     runs: int = 0,
+    all_cities: bool = False,
+    stagger: bool = False,
 ) -> dict:
     return _start(
         "upgrade",
@@ -334,6 +395,8 @@ def start_upgrade(
             "interval_s": int(interval_minutes) * 60,
             "extra_wait_max": extra_wait_max,
             "runs": runs,
+            "all_cities": all_cities,
+            "stagger": stagger,
         },
     )
 
