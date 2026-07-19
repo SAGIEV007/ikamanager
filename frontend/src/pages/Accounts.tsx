@@ -157,6 +157,9 @@ export function Accounts() {
       {/* Multi-account (bulk) controls */}
       {accounts.length > 0 && <MultiAccountPanel />}
 
+      {/* Live status of every running donation/upgrade across all accounts */}
+      {accounts.length > 0 && <RunningTasksPanel />}
+
       {/* Accounts Table */}
       <div className="bg-[#16213e] rounded-xl border border-purple-900/30 overflow-hidden">
         {accounts.length === 0 ? (
@@ -289,23 +292,7 @@ function MultiAccountPanel() {
   const [donateInterval, setDonateInterval] = useState('30');
   const [upgradeInterval, setUpgradeInterval] = useState('20');
   const [msg, setMsg] = useState<string | null>(null);
-  const [tasks, setTasks] = useState<ResourceTaskStatus[]>([]);
   const [open, setOpen] = useState(false);
-
-  const refresh = async () => {
-    try {
-      const res = await bulkApi.status();
-      setTasks(res.data.tasks || []);
-    } catch {
-      /* ignore */
-    }
-  };
-
-  useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 5000);
-    return () => clearInterval(t);
-  }, []);
 
   const toggle = (id: number) =>
     setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
@@ -336,7 +323,6 @@ function MultiAccountPanel() {
         runs: 0,
       });
       report(res.data);
-      await refresh();
     } catch (e: any) {
       setMsg(e.response?.data?.detail || 'Falha ao iniciar doações.');
     }
@@ -353,7 +339,6 @@ function MultiAccountPanel() {
         runs: 0,
       });
       report(res.data);
-      await refresh();
     } catch (e: any) {
       setMsg(e.response?.data?.detail || 'Falha ao iniciar upgrades.');
     }
@@ -364,13 +349,11 @@ function MultiAccountPanel() {
     try {
       await Promise.all([bulkApi.stopDonate(selected), bulkApi.stopUpgrade(selected)]);
       setMsg('Tarefas paradas nas contas selecionadas.');
-      await refresh();
     } catch (e: any) {
       setMsg(e.response?.data?.detail || 'Falha ao parar.');
     }
   };
 
-  const nameOf = (id: number) => accounts.find((a) => a.id === id)?.nickname || `#${id}`;
   const proxyOf = (id: number) => {
     const acc = accounts.find((a) => a.id === id);
     if (!acc?.proxy_id) return 'sem proxy';
@@ -532,28 +515,197 @@ function MultiAccountPanel() {
               </div>
 
               {msg && <p className="text-xs text-blue-300">{msg}</p>}
-
-              {/* Running tasks overview */}
-              {tasks.length > 0 && (
-                <div className="bg-slate-900/40 rounded-lg p-3">
-                  <p className="text-xs font-medium text-slate-300 mb-2">Tarefas rodando</p>
-                  <div className="space-y-1">
-                    {tasks.map((t) => (
-                      <p key={`${t.kind}-${t.account_id}`} className="text-[11px] text-slate-300">
-                        <span className="text-slate-500">
-                          {t.kind === 'donate' ? 'Doação' : t.kind === 'upgrade' ? 'Upgrade' : t.kind}
-                        </span>{' '}
-                        — {nameOf(t.account_id ?? -1)}: {t.running ? '▶ ' : ''}
-                        {t.runs_done} ciclo(s) — {t.message}
-                      </p>
-                    ))}
-                  </div>
-                </div>
-              )}
             </>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+const RES_SHORT: Record<string, string> = {
+  wood: 'madeira',
+  tradegood: 'luxo',
+};
+
+function summarizeTask(t: ResourceTaskStatus): string {
+  const cfg = t.config || {};
+  const intervalMin = cfg.interval_s ? Math.round(Number(cfg.interval_s) / 60) : null;
+  if (t.kind === 'donate') {
+    const res = RES_SHORT[String(cfg.resource_type)] || String(cfg.resource_type ?? '');
+    const qty =
+      Number(cfg.percent) > 0
+        ? `${cfg.percent}% do estoque`
+        : `${Number(cfg.amount || 0).toLocaleString('pt-BR')} un`;
+    return `${qty} de ${res}${intervalMin ? ` · a cada ~${intervalMin}min` : ''}`;
+  }
+  if (t.kind === 'upgrade') {
+    const where = cfg.position != null ? `posição ${cfg.position}` : 'escolha inteligente';
+    return `${where}${intervalMin ? ` · tenta a cada ~${intervalMin}min` : ''}`;
+  }
+  return '';
+}
+
+const STATE_STYLES: Record<string, { label: string; cls: string }> = {
+  running: { label: 'Rodando', cls: 'bg-emerald-900/40 text-emerald-300 border-emerald-700/50' },
+  waiting_hours: { label: 'Fora do horário', cls: 'bg-amber-900/40 text-amber-300 border-amber-700/50' },
+  error: { label: 'Erro', cls: 'bg-red-900/40 text-red-300 border-red-700/50' },
+  done: { label: 'Concluído', cls: 'bg-slate-700/40 text-slate-300 border-slate-600/50' },
+  stopped: { label: 'Parado', cls: 'bg-slate-700/40 text-slate-400 border-slate-600/50' },
+};
+
+function StateChip({ state, running }: { state: string; running: boolean }) {
+  const key = !running && state === 'running' ? 'stopped' : state;
+  const s = STATE_STYLES[key] || { label: state, cls: 'bg-slate-700/40 text-slate-300 border-slate-600/50' };
+  return (
+    <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] border ${s.cls}`}>
+      {s.label}
+    </span>
+  );
+}
+
+function countdown(nextRunAt: number | null, now: number): string {
+  if (!nextRunAt) return '—';
+  const secs = Math.max(0, Math.round(nextRunAt - now / 1000));
+  if (secs <= 0) return 'agora';
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  if (m >= 60) {
+    const h = Math.floor(m / 60);
+    return `${h}h${m % 60}min`;
+  }
+  return m > 0 ? `${m}min ${s}s` : `${s}s`;
+}
+
+function RunningTasksPanel() {
+  const { accounts, proxies } = useStore();
+  const [tasks, setTasks] = useState<ResourceTaskStatus[]>([]);
+  const [now, setNow] = useState(Date.now());
+  const [busyStop, setBusyStop] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      const res = await bulkApi.status();
+      setTasks(res.data.tasks || []);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  useEffect(() => {
+    refresh();
+    const t = setInterval(refresh, 3000);
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      clearInterval(t);
+      clearInterval(tick);
+    };
+  }, []);
+
+  const nameOf = (id: number) => accounts.find((a) => a.id === id)?.nickname || `#${id}`;
+  const proxyOf = (id: number) => {
+    const acc = accounts.find((a) => a.id === id);
+    if (!acc?.proxy_id) return null;
+    const p = proxies.find((x) => x.id === acc.proxy_id);
+    return p ? p.label || p.host : null;
+  };
+
+  const stopOne = async (kind: string, accountId: number) => {
+    const key = `${kind}-${accountId}`;
+    setBusyStop(key);
+    try {
+      if (kind === 'donate') await bulkApi.stopDonate([accountId]);
+      else if (kind === 'upgrade') await bulkApi.stopUpgrade([accountId]);
+      await refresh();
+    } catch {
+      /* ignore */
+    } finally {
+      setBusyStop(null);
+    }
+  };
+
+  const active = tasks.filter((t) => t.kind === 'donate' || t.kind === 'upgrade');
+  const donateCount = active.filter((t) => t.kind === 'donate' && t.running).length;
+  const upgradeCount = active.filter((t) => t.kind === 'upgrade' && t.running).length;
+
+  if (active.length === 0) return null;
+
+  return (
+    <div className="bg-[#16213e] rounded-xl border border-purple-900/30 p-4 mb-6">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-purple-200">Ações em andamento</h2>
+        <span className="text-xs text-slate-500">
+          {donateCount} doação(ões) · {upgradeCount} upgrade(s) rodando
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-slate-500 border-b border-slate-700/60">
+              <th className="text-left py-2 pr-3">Conta</th>
+              <th className="text-left py-2 pr-3">Ação</th>
+              <th className="text-left py-2 pr-3">Configuração</th>
+              <th className="text-left py-2 pr-3">Estado</th>
+              <th className="text-right py-2 pr-3">Ciclos</th>
+              <th className="text-right py-2 pr-3">Próximo</th>
+              <th className="text-right py-2">—</th>
+            </tr>
+          </thead>
+          <tbody>
+            {active.map((t) => {
+              const id = t.account_id ?? -1;
+              const proxy = proxyOf(id);
+              const key = `${t.kind}-${id}`;
+              return (
+                <tr key={key} className="border-b border-slate-800/60">
+                  <td className="py-2 pr-3">
+                    <div className="text-slate-200">{nameOf(id)}</div>
+                    <div className="text-[10px] text-slate-500">
+                      {proxy ? `proxy: ${proxy}` : 'sem proxy'}
+                    </div>
+                  </td>
+                  <td className="py-2 pr-3">
+                    <span
+                      className={
+                        t.kind === 'donate' ? 'text-emerald-300' : 'text-sky-300'
+                      }
+                    >
+                      {t.kind === 'donate' ? 'Doação' : 'Upgrade'}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-3 text-slate-400">{summarizeTask(t)}</td>
+                  <td className="py-2 pr-3">
+                    <StateChip state={t.state} running={!!t.running} />
+                    {(t.state === 'error' || t.last_result === 'failed') && t.last_message && (
+                      <div className="text-[10px] text-red-400 mt-0.5 max-w-[220px] truncate" title={t.last_message}>
+                        {t.last_message}
+                      </div>
+                    )}
+                  </td>
+                  <td className="py-2 pr-3 text-right text-slate-300">
+                    {t.runs_done}
+                    {t.runs ? `/${t.runs}` : ''}
+                  </td>
+                  <td className="py-2 pr-3 text-right text-slate-300">
+                    {t.running ? countdown(t.next_run_at, now) : '—'}
+                  </td>
+                  <td className="py-2 text-right">
+                    {t.running && (
+                      <button
+                        onClick={() => stopOne(t.kind || '', id)}
+                        disabled={busyStop === key}
+                        className="px-2 py-1 rounded bg-orange-800/60 hover:bg-orange-700 text-orange-200 text-[10px] transition disabled:opacity-50"
+                      >
+                        Parar
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
