@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from app.database import async_session
 from app.models.account import IkariamAccount
+from app.models.resource_job import ResourceJob
 from app.services.ikariam.game_actions import GameActionService
 from app.services.ikariam.runner_common import (
     human_wait,
@@ -63,6 +64,54 @@ def status_all(kind: Optional[str] = None) -> list[dict]:
     return out
 
 
+async def _persist_job(kind: str, account_id: int, config: dict) -> None:
+    """Upsert the job as active so it can be resumed after a restart."""
+    try:
+        async with async_session() as db:
+            existing = (
+                await db.execute(
+                    select(ResourceJob).where(
+                        ResourceJob.account_id == account_id,
+                        ResourceJob.kind == kind,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(
+                    ResourceJob(
+                        account_id=account_id,
+                        kind=kind,
+                        config=dict(config),
+                        is_active=True,
+                    )
+                )
+            else:
+                existing.config = dict(config)
+                existing.is_active = True
+            await db.commit()
+    except Exception:  # noqa: BLE001 - persistence must never break the loop
+        logger.exception("Falha ao salvar job %s da conta %s", kind, account_id)
+
+
+async def _deactivate_job(kind: str, account_id: int) -> None:
+    """Mark the job inactive so it is NOT resumed on the next restart."""
+    try:
+        async with async_session() as db:
+            existing = (
+                await db.execute(
+                    select(ResourceJob).where(
+                        ResourceJob.account_id == account_id,
+                        ResourceJob.kind == kind,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                existing.is_active = False
+                await db.commit()
+    except Exception:  # noqa: BLE001 - persistence must never break the loop
+        logger.exception("Falha ao desativar job %s da conta %s", kind, account_id)
+
+
 async def _perform(kind: str, account_id: int, config: dict) -> dict:
     """Run one action of the given kind and return its result dict."""
     async with async_session() as db:
@@ -95,6 +144,8 @@ async def _run_loop(kind: str, account_id: int, config: dict) -> None:
     interval = int(config.get("interval_s", 1800))
     extra_wait_max = int(config.get("extra_wait_max", 60))
     runs = int(config.get("runs", 0))  # 0 = infinite
+    # Persist the job so it can be resumed automatically after a restart.
+    await _persist_job(kind, account_id, config)
     try:
         while runs == 0 or status["runs_done"] < runs:
             # Operation-hours window (a normal player doesn't grind 24/7).
@@ -158,6 +209,8 @@ async def _run_loop(kind: str, account_id: int, config: dict) -> None:
         status["state"] = "done"
         status["next_run_at"] = None
         status["message"] = f"Concluido: {status['runs_done']} ciclos."
+        # Finished on its own: don't resume it after a restart.
+        await _deactivate_job(kind, account_id)
     except asyncio.CancelledError:
         status["state"] = "stopped"
         status["next_run_at"] = None
@@ -233,6 +286,8 @@ def start_upgrade(
 
 
 async def stop(kind: str, account_id: int) -> None:
+    # Stopped by the user: mark inactive so it is not resumed on restart.
+    await _deactivate_job(kind, account_id)
     task = _TASKS.get(_key(kind, account_id))
     if task is None or task.done():
         return
@@ -241,3 +296,39 @@ async def stop(kind: str, account_id: int) -> None:
         await task
     except asyncio.CancelledError:
         pass
+
+
+async def resume_active_jobs() -> int:
+    """Restart every job left active in the DB (called on app startup).
+
+    Returns the number of jobs resumed. Idempotent: jobs already running are
+    skipped.
+    """
+    resumed = 0
+    try:
+        async with async_session() as db:
+            jobs = (
+                await db.execute(
+                    select(ResourceJob).where(ResourceJob.is_active.is_(True))
+                )
+            ).scalars().all()
+    except Exception:  # noqa: BLE001 - never block startup on this
+        logger.exception("Falha ao ler jobs persistidos no startup")
+        return 0
+
+    for job in jobs:
+        if is_running(job.kind, job.account_id):
+            continue
+        try:
+            _start(job.kind, job.account_id, dict(job.config or {}))
+            resumed += 1
+        except ValueError:
+            # Already running or invalid; skip.
+            continue
+        except Exception:  # noqa: BLE001 - one bad job must not stop the rest
+            logger.exception(
+                "Falha ao retomar job %s da conta %s", job.kind, job.account_id
+            )
+    if resumed:
+        logger.info("Retomadas %s tarefa(s) de recursos do banco.", resumed)
+    return resumed

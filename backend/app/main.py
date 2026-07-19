@@ -16,8 +16,11 @@ from app.routers import accounts, proxies, automation, websocket, settings as se
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize database on startup."""
+    """Initialize database and resume persisted resource jobs on startup."""
     await init_db()
+    from app.services.ikariam.auto_resources import resume_active_jobs
+
+    await resume_active_jobs()
     yield
 
 
