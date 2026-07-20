@@ -390,65 +390,44 @@ class IkariamSession:
         return self._parse_research(best)
 
     def _has_research_tree(self, html: str) -> bool:
-        """Only trust a response that carries the actual research tree, not the
-        advisor menu link that appears in every page header."""
-        text = self._research_search_text(html)
-        return "js_ResearchGraphViewData" in text or "researchType" in text
+        """Only trust a response that carries the actual research advisor data,
+        not the advisor menu link that appears in every page header."""
+        return bool(self._research_template(html))
 
-    def _research_search_text(self, html: str) -> str:
-        """Return searchable text. AJAX responses are JSON arrays whose HTML
-        template is escaped inside a string; flatten every string value so the
-        embedded tree becomes searchable too."""
+    def _research_template(self, html: str) -> dict:
+        """Return the ``updateTemplateData`` dict from a research-advisor AJAX
+        response (a JSON array), or ``{}`` when it isn't present."""
         stripped = html.lstrip()
         if not stripped.startswith("["):
-            return html
+            return {}
         try:
             arr = json.loads(html, strict=False)
         except json.JSONDecodeError:
-            return html
-        parts: list[str] = [html]
-
-        def collect(node: object) -> None:
-            if isinstance(node, str):
-                parts.append(node)
-            elif isinstance(node, list):
-                for item in node:
-                    collect(item)
-            elif isinstance(node, dict):
-                for value in node.values():
-                    collect(value)
-
-        collect(arr)
-        return "\n".join(parts)
+            return {}
+        for entry in arr:
+            if (
+                isinstance(entry, list)
+                and len(entry) >= 2
+                and entry[0] == "updateTemplateData"
+                and isinstance(entry[1], dict)
+            ):
+                td = entry[1]
+                if any(k.startswith("js_researchAdvisor") for k in td):
+                    return td
+        return {}
 
     def _parse_research(self, html: str) -> dict:
-        """Try to extract research nodes. Falls back to dumping the page."""
-        data: object = None
-        text = self._research_search_text(html)
+        """Parse the research advisor screen.
 
-        blob = re.search(
-            r"js_ResearchGraphViewData\s*=\s*JSON\.parse\(\s*'(.+?)'\s*\)", text
-        )
-        if blob:
-            raw = blob.group(1).encode().decode("unicode_escape")
-            try:
-                data = json.loads(raw, strict=False)
-            except json.JSONDecodeError:
-                data = None
-
-        if data is None:
-            bg = re.search(
-                r'"updateBackgroundData",\s?([\s\S]*?)\],\["updateTemplateData"', text
-            )
-            if bg:
-                try:
-                    data = json.loads(bg.group(1), strict=False)
-                except json.JSONDecodeError:
-                    data = None
-
-        options, in_progress = self._extract_research_nodes(data)
-
-        if not options and not in_progress and data is None:
+        Ikariam's research advisor groups researches into five categories
+        (``economy``, ``seafaring``, ``knowledge``, ``military``, ``mythology``).
+        Each category exposes its *next* research (name + cost) and whether it is
+        affordable now (``addClass == "red"`` means not enough research points).
+        Researching happens per category via ``doResearch&type=<category>``,
+        which unlocks that category's next item.
+        """
+        td = self._research_template(html)
+        if not td:
             path = self._dump_debug(html, "debug_research.html")
             return {
                 "parsed": False,
@@ -457,84 +436,78 @@ class IkariamSession:
                 "dump": path,
             }
 
+        options = self._extract_research_nodes(td)
         return {
             "parsed": True,
-            "in_progress": in_progress,
+            # Research unlocks are instantaneous in Ikariam (points accrue over
+            # time via scientists), so there is no "ongoing research" state.
+            "in_progress": False,
             "options": options,
             "dump": "",
         }
 
-    def _extract_research_nodes(self, data: object) -> tuple[list, bool]:
-        """Walk the parsed structure collecting researchable nodes.
+    def _extract_research_nodes(self, td: dict) -> list:
+        """Collect the next researchable item of each category from the parsed
+        ``updateTemplateData`` dict.
 
-        A node is considered *available now* when it exposes a truthy
-        availability flag (``possible``/``canResearch``/``buyable``) and is not
-        already finished (``researched``/``done``). Any node flagged active/
-        running marks a research already in progress.
+        Returns a list of dicts::
+
+            {"type": "economy", "name": "Recolha ...", "category": "Economia",
+             "cost": 990, "affordable": True}
         """
         options: list = []
-        in_progress = False
+        for n in range(0, 12):
+            change = td.get(f"js_researchAdvisorChangeResearchType{n}")
+            if not isinstance(change, dict):
+                continue
+            match = re.search(
+                r"researchType=(\w+)", str(change.get("ajaxrequest", ""))
+            )
+            if not match:
+                continue
+            category = match.group(1)
+            cat_name = str(
+                td.get(f"js_researchAdvisorChangeResearchTypeTxt{n}", category)
+            )
+            next_name = str(
+                td.get(f"js_researchAdvisorNextResearchName{n}", "")
+            ).strip()
+            if not next_name:
+                # Category fully researched / no next item available.
+                continue
+            cost_info = td.get(f"js_researchAdvisorNextResearchCost{n}")
+            cost_text = ""
+            affordable = True
+            if isinstance(cost_info, dict):
+                cost_text = str(cost_info.get("text", ""))
+                affordable = cost_info.get("addClass") != "red"
+            options.append(
+                {
+                    "type": category,
+                    "name": next_name,
+                    "category": cat_name,
+                    "cost": self._digits_to_int(cost_text),
+                    "affordable": affordable,
+                }
+            )
+        return options
 
-        avail_keys = ("possible", "canResearch", "buyable", "available", "enabled")
-        done_keys = ("researched", "done", "finished", "isResearched")
-        active_keys = ("active", "inProgress", "running", "isResearching")
-        id_keys = ("researchType", "researchId", "type", "id")
-        name_keys = ("researchName", "name", "label", "title")
-        cost_keys = ("researchPoints", "cost", "points", "price")
-
-        def as_int(value: object) -> int:
-            if isinstance(value, bool):
-                return 0
-            if isinstance(value, (int, float)):
-                return int(value)
-            if isinstance(value, str) and value.strip().isdigit():
-                return int(value.strip())
-            return 0
-
-        def visit(node: object) -> None:
-            nonlocal in_progress
-            if isinstance(node, list):
-                for item in node:
-                    visit(item)
-                return
-            if not isinstance(node, dict):
-                return
-
-            if any(bool(node.get(k)) for k in active_keys):
-                in_progress = True
-
-            is_available = any(bool(node.get(k)) for k in avail_keys)
-            is_done = any(bool(node.get(k)) for k in done_keys)
-            r_id = next((node.get(k) for k in id_keys if node.get(k)), None)
-
-            if is_available and not is_done and r_id is not None:
-                name = next(
-                    (str(node.get(k)) for k in name_keys if node.get(k)),
-                    str(r_id),
-                )
-                cost = next((as_int(node.get(k)) for k in cost_keys if k in node), 0)
-                options.append({"type": str(r_id), "name": name, "cost": cost})
-
-            for value in node.values():
-                if isinstance(value, (dict, list)):
-                    visit(value)
-
-        visit(data)
-        # De-duplicate by research type, keeping the cheapest occurrence.
-        seen: dict = {}
-        for opt in options:
-            key = opt["type"]
-            if key not in seen or opt["cost"] < seen[key]["cost"]:
-                seen[key] = opt
-        return list(seen.values()), in_progress
+    @staticmethod
+    def _digits_to_int(text: str) -> int:
+        """Parse a localized number like ``"2.048"`` / ``"2,236"`` into an int
+        by keeping only the digits (thousands separators are dropped)."""
+        digits = re.sub(r"[^0-9]", "", text or "")
+        return int(digits) if digits else 0
 
     async def start_research(self, research_type: str) -> str:
-        """Start a research by its type id (best effort)."""
+        """Unlock the next research of a category (``economy``/``seafaring``/
+        ``knowledge``/``military``/``mythology``), mirroring the in-game
+        ``doResearch`` link."""
         await self.get_action_token()
         query = (
-            f"action=Advisor&function=doResearch&researchType={research_type}"
-            f"&backgroundView=researchAdvisor&templateView=researchAdvisor"
-            f"&actionRequest={self.action_token}&ajax=1"
+            f"action=Advisor&function=doResearch&actionRequest={self.action_token}"
+            f"&type={research_type}&backgroundView=researchAdvisor"
+            f"&templateView=researchAdvisor&ajax=1"
         )
         return await self._post(query)
 

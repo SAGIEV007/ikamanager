@@ -68,28 +68,17 @@ def _upgrade_rank(building: str) -> int:
     return _PRIORITY_RANK.get(building, _DEFAULT_RANK)
 
 
-# Economy-oriented research keywords (pt-br / en). Used to prefer research that
-# boosts resources/storage/economy first when several are available.
-_RESEARCH_PRIORITY: tuple[str, ...] = (
-    "economia",
+# Research category priority (Ikariam groups researches into five trees). For a
+# resource/value focus we pursue Economy first (storage, wine, resource
+# gathering, gold), then Science (more research points => everything faster),
+# then Seafaring (trade/cargo), leaving Mythology and Military last. Categories
+# are the ``researchType`` ids reported by the research advisor.
+_RESEARCH_CATEGORY_PRIORITY: tuple[str, ...] = (
     "economy",
-    "comercio",
-    "comercial",
-    "trade",
-    "armazen",
-    "deposito",
-    "storage",
-    "carga",
-    "expedicao",
-    "well",
-    "construcao",
-    "constru",
-    "carpint",
-    "recurso",
-    "resource",
-    "producao",
-    "geometr",
-    "conserv",
+    "knowledge",
+    "seafaring",
+    "mythology",
+    "military",
 )
 
 
@@ -435,11 +424,11 @@ class GameActionService:
     async def research_next(self) -> dict:
         """Start the next research (Level-2 autopilot), best effort.
 
-        Reads the research advisor, skips when a research is already running or
-        nothing is available, otherwise picks an economy-oriented research when
-        possible (falling back to the cheapest available) and starts it. If the
-        research screen cannot be parsed it returns ``skipped`` with the path of
-        the auto-saved page dump so the parser can be refined later.
+        Reads the research advisor, skips when nothing is affordable yet,
+        otherwise picks the highest-priority affordable category (economy first)
+        and unlocks its next research. If the research screen cannot be parsed it
+        returns ``skipped`` with the path of the auto-saved page dump so the
+        parser can be refined later.
         """
         async with account_locks.get_lock(self.account.id):
             session = await self._open_session()
@@ -456,28 +445,31 @@ class GameActionService:
                         + hint,
                     }
 
-                if data.get("in_progress"):
-                    return {
-                        "status": "skipped",
-                        "message": "Pesquisa ja em andamento.",
-                    }
-
                 options = data.get("options", [])
                 if not options:
                     return {
                         "status": "skipped",
-                        "message": "Nenhuma pesquisa disponivel agora.",
+                        "message": "Nenhuma pesquisa disponivel agora "
+                        "(arvores concluidas?).",
                     }
 
                 target = self._pick_research(options)
+                if target is None:
+                    return {
+                        "status": "skipped",
+                        "message": "Pontos de pesquisa insuficientes por "
+                        "enquanto (aguardando acumular).",
+                    }
+
                 resp = await session.start_research(target["type"])
                 success = session.action_succeeded(resp)
                 self.account.last_action = datetime.utcnow()
                 await self.db.commit()
+                label = target.get("category") or target["type"]
                 return {
                     "status": "success" if success else "failed",
                     "message": (
-                        f"Pesquisa '{target['name']}' "
+                        f"Pesquisa '{target['name']}' ({label}) "
                         + ("iniciada." if success else "falhou.")
                     ),
                 }
@@ -485,14 +477,27 @@ class GameActionService:
                 await session.close()
 
     @staticmethod
-    def _pick_research(options: list) -> dict:
-        """Prefer economy-oriented research, then the cheapest available."""
-        def score(opt: dict) -> tuple:
-            name = str(opt.get("name", "")).lower()
-            is_economy = any(k in name for k in _RESEARCH_PRIORITY)
-            return (0 if is_economy else 1, opt.get("cost") or 0)
+    def _pick_research(options: list) -> Optional[dict]:
+        """Pick the next research to unlock among the category options.
 
-        return sorted(options, key=score)[0]
+        Only affordable categories are considered (Ikariam refuses a research
+        when you lack the points). Among those, prefer categories earlier in
+        ``_RESEARCH_CATEGORY_PRIORITY`` (economy first), breaking ties by the
+        cheapest cost. Returns ``None`` when nothing is affordable yet.
+        """
+        affordable = [o for o in options if o.get("affordable", True)]
+        if not affordable:
+            return None
+
+        def score(opt: dict) -> tuple:
+            category = str(opt.get("type", "")).lower()
+            try:
+                rank = _RESEARCH_CATEGORY_PRIORITY.index(category)
+            except ValueError:
+                rank = len(_RESEARCH_CATEGORY_PRIORITY)
+            return (rank, opt.get("cost") or 0)
+
+        return sorted(affordable, key=score)[0]
 
     async def start_piracy(self, city_id, mission_level: int = 1) -> dict:
         async with account_locks.get_lock(self.account.id):
