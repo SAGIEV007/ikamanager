@@ -411,6 +411,19 @@ class BulkUpgradeRequest(BaseModel):
     all_cities: bool = False  # upgrade in every own city of each account
 
 
+class AutoResearchRequest(BaseModel):
+    interval_minutes: int = Field(default=60, ge=1)
+    extra_wait_max: int = Field(default=120, ge=0)
+    runs: int = Field(default=0, ge=0)  # 0 = infinite (until stopped)
+
+
+class BulkResearchRequest(BaseModel):
+    account_ids: list[int] = Field(default_factory=list)
+    interval_minutes: int = Field(default=60, ge=1)
+    extra_wait_max: int = Field(default=120, ge=0)
+    runs: int = Field(default=0, ge=0)
+
+
 class BulkStopRequest(BaseModel):
     account_ids: list[int] = Field(default_factory=list)
 
@@ -735,6 +748,42 @@ async def auto_upgrade_status(account_id: int):
     }
 
 
+@router.post("/{account_id}/research/auto/start")
+async def start_auto_research(
+    account_id: int, data: AutoResearchRequest, db: AsyncSession = Depends(get_db)
+):
+    """Start recurring automatic research (Academy) for this account."""
+    await _require_online_account(account_id, db)
+    try:
+        status = auto_resources.start_research(
+            account_id=account_id,
+            interval_minutes=data.interval_minutes,
+            extra_wait_max=data.extra_wait_max,
+            runs=data.runs,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"status": "started", "detail": status}
+
+
+@router.post("/{account_id}/research/auto/stop")
+async def stop_auto_research(account_id: int):
+    """Stop the recurring research loop for this account."""
+    await auto_resources.stop("research", account_id)
+    return {
+        "status": "stopped",
+        "detail": auto_resources.get_status("research", account_id),
+    }
+
+
+@router.get("/{account_id}/research/auto/status")
+async def auto_research_status(account_id: int):
+    return {
+        "running": auto_resources.is_running("research", account_id),
+        "detail": auto_resources.get_status("research", account_id),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Multi-account (bulk) controls
 # ---------------------------------------------------------------------------
@@ -838,6 +887,30 @@ async def bulk_start_upgrade(data: BulkUpgradeRequest, db: AsyncSession = Depend
     return {"started": started, "skipped": errors}
 
 
+@bulk_router.post("/research/auto/start")
+async def bulk_start_research(
+    data: BulkResearchRequest, db: AsyncSession = Depends(get_db)
+):
+    """Start automatic research across many accounts at once."""
+    runnable, skipped = await _runnable_accounts(data.account_ids, db)
+    started, errors = [], list(skipped)
+    for acc in runnable:
+        try:
+            auto_resources.start_research(
+                account_id=acc.id,
+                interval_minutes=data.interval_minutes,
+                extra_wait_max=data.extra_wait_max,
+                runs=data.runs,
+                stagger=True,
+            )
+            started.append(acc.id)
+        except ValueError as e:
+            errors.append({"account_id": acc.id, "reason": str(e)})
+        except Exception as e:  # noqa: BLE001 - surface per-account failures
+            errors.append({"account_id": acc.id, "reason": str(e)})
+    return {"started": started, "skipped": errors}
+
+
 @bulk_router.post("/donate/auto/stop")
 async def bulk_stop_donate(data: BulkStopRequest):
     for aid in data.account_ids:
@@ -849,6 +922,13 @@ async def bulk_stop_donate(data: BulkStopRequest):
 async def bulk_stop_upgrade(data: BulkStopRequest):
     for aid in data.account_ids:
         await auto_resources.stop("upgrade", aid)
+    return {"stopped": data.account_ids}
+
+
+@bulk_router.post("/research/auto/stop")
+async def bulk_stop_research(data: BulkStopRequest):
+    for aid in data.account_ids:
+        await auto_resources.stop("research", aid)
     return {"stopped": data.account_ids}
 
 

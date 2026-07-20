@@ -242,12 +242,12 @@ class IkariamSession:
         async with self.session.get(url, headers=headers, allow_redirects=True) as resp:
             return await resp.text()
 
-    def _dump_debug(self, html: str) -> str:
+    def _dump_debug(self, html: str, name: str = "debug_city_response.html") -> str:
         """Persist a raw response so parsing issues can be diagnosed."""
         try:
             import os
 
-            path = os.path.join(os.getcwd(), "debug_city_response.html")
+            path = os.path.join(os.getcwd(), name)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(html)
             return path
@@ -347,6 +347,159 @@ class IkariamSession:
             f"&cityId={city_id}&position={int(position)}&level={level}"
             f"&activeTab=tabSendTransporter&backgroundView=city"
             f"&currentCityId={city_id}&templateView={building_type}&ajax=1"
+        )
+        return await self._post(query)
+
+    # ------------------------------------------------------------------ #
+    # Research (Academy) - best effort
+    # ------------------------------------------------------------------ #
+    async def get_research(self) -> dict:
+        """Best-effort read of the research advisor screen.
+
+        Ikariam embeds the research tree either as a ``js_ResearchGraphViewData``
+        JSON blob or inside the ``updateBackgroundData`` AJAX array. We try
+        several tolerant patterns and, if none match, dump the page for later
+        diagnosis instead of guessing.
+
+        Returns a dict:
+            {"parsed": bool, "in_progress": bool,
+             "options": [{"type": str, "name": str, "cost": int}],
+             "dump": str}
+        """
+        html = await self._get_ajax(
+            "view=researchAdvisor&backgroundView=researchAdvisor"
+            f"&actionRequest={self.action_token or 'REQUESTID'}&ajax=1"
+        )
+        if self._is_expired(html):
+            raise GameSessionError("Sessao do jogo expirada. Faca login novamente.")
+        if not self._looks_like_research(html):
+            plain = await self._get("view=researchAdvisor")
+            if self._is_expired(plain):
+                raise GameSessionError(
+                    "Sessao do jogo expirada. Faca login novamente."
+                )
+            if self._looks_like_research(plain):
+                html = plain
+        return self._parse_research(html)
+
+    def _looks_like_research(self, html: str) -> bool:
+        return bool(
+            re.search(r"js_ResearchGraphViewData|researchType|researchAdvisor", html)
+        )
+
+    def _parse_research(self, html: str) -> dict:
+        """Try to extract research nodes. Falls back to dumping the page."""
+        data: object = None
+
+        blob = re.search(
+            r"js_ResearchGraphViewData\s*=\s*JSON\.parse\(\s*'(.+?)'\s*\)", html
+        )
+        if blob:
+            raw = blob.group(1).encode().decode("unicode_escape")
+            try:
+                data = json.loads(raw, strict=False)
+            except json.JSONDecodeError:
+                data = None
+
+        if data is None:
+            bg = re.search(
+                r'"updateBackgroundData",\s?([\s\S]*?)\],\["updateTemplateData"', html
+            )
+            if bg:
+                try:
+                    data = json.loads(bg.group(1), strict=False)
+                except json.JSONDecodeError:
+                    data = None
+
+        options, in_progress = self._extract_research_nodes(data)
+
+        if not options and not in_progress and data is None:
+            path = self._dump_debug(html, "debug_research.html")
+            return {
+                "parsed": False,
+                "in_progress": False,
+                "options": [],
+                "dump": path,
+            }
+
+        return {
+            "parsed": True,
+            "in_progress": in_progress,
+            "options": options,
+            "dump": "",
+        }
+
+    def _extract_research_nodes(self, data: object) -> tuple[list, bool]:
+        """Walk the parsed structure collecting researchable nodes.
+
+        A node is considered *available now* when it exposes a truthy
+        availability flag (``possible``/``canResearch``/``buyable``) and is not
+        already finished (``researched``/``done``). Any node flagged active/
+        running marks a research already in progress.
+        """
+        options: list = []
+        in_progress = False
+
+        avail_keys = ("possible", "canResearch", "buyable", "available", "enabled")
+        done_keys = ("researched", "done", "finished", "isResearched")
+        active_keys = ("active", "inProgress", "running", "isResearching")
+        id_keys = ("researchType", "researchId", "type", "id")
+        name_keys = ("researchName", "name", "label", "title")
+        cost_keys = ("researchPoints", "cost", "points", "price")
+
+        def as_int(value: object) -> int:
+            if isinstance(value, bool):
+                return 0
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, str) and value.strip().isdigit():
+                return int(value.strip())
+            return 0
+
+        def visit(node: object) -> None:
+            nonlocal in_progress
+            if isinstance(node, list):
+                for item in node:
+                    visit(item)
+                return
+            if not isinstance(node, dict):
+                return
+
+            if any(bool(node.get(k)) for k in active_keys):
+                in_progress = True
+
+            is_available = any(bool(node.get(k)) for k in avail_keys)
+            is_done = any(bool(node.get(k)) for k in done_keys)
+            r_id = next((node.get(k) for k in id_keys if node.get(k)), None)
+
+            if is_available and not is_done and r_id is not None:
+                name = next(
+                    (str(node.get(k)) for k in name_keys if node.get(k)),
+                    str(r_id),
+                )
+                cost = next((as_int(node.get(k)) for k in cost_keys if k in node), 0)
+                options.append({"type": str(r_id), "name": name, "cost": cost})
+
+            for value in node.values():
+                if isinstance(value, (dict, list)):
+                    visit(value)
+
+        visit(data)
+        # De-duplicate by research type, keeping the cheapest occurrence.
+        seen: dict = {}
+        for opt in options:
+            key = opt["type"]
+            if key not in seen or opt["cost"] < seen[key]["cost"]:
+                seen[key] = opt
+        return list(seen.values()), in_progress
+
+    async def start_research(self, research_type: str) -> str:
+        """Start a research by its type id (best effort)."""
+        await self.get_action_token()
+        query = (
+            f"action=Advisor&function=doResearch&researchType={research_type}"
+            f"&backgroundView=researchAdvisor&templateView=researchAdvisor"
+            f"&actionRequest={self.action_token}&ajax=1"
         )
         return await self._post(query)
 

@@ -172,6 +172,14 @@ export const accountsApi = {
     api.get<{ running: boolean; detail: ResourceTaskStatus | null }>(
       `/accounts/${id}/upgrade/auto/status`
     ),
+  // Recurring automatic research (Academy)
+  startAutoResearch: (id: number, cfg: AutoResearchConfig) =>
+    api.post(`/accounts/${id}/research/auto/start`, cfg),
+  stopAutoResearch: (id: number) => api.post(`/accounts/${id}/research/auto/stop`),
+  autoResearchStatus: (id: number) =>
+    api.get<{ running: boolean; detail: ResourceTaskStatus | null }>(
+      `/accounts/${id}/research/auto/status`
+    ),
   piracy: (id: number, cityId: string, missionLevel: number) =>
     api.post(`/accounts/${id}/piracy`, { city_id: cityId, mission_level: missionLevel }),
   startAutoPiracy: (
@@ -214,6 +222,12 @@ export interface AutoUpgradeConfig {
   all_cities?: boolean;
 }
 
+export interface AutoResearchConfig {
+  interval_minutes?: number;
+  extra_wait_max?: number;
+  runs?: number;
+}
+
 export interface ResourceTaskStatus {
   state: string;
   kind?: string;
@@ -247,6 +261,10 @@ export const bulkApi = {
     api.post('/bulk/upgrade/auto/start', { account_ids: accountIds, ...cfg }),
   stopUpgrade: (accountIds: number[]) =>
     api.post('/bulk/upgrade/auto/stop', { account_ids: accountIds }),
+  startResearch: (accountIds: number[], cfg: AutoResearchConfig) =>
+    api.post('/bulk/research/auto/start', { account_ids: accountIds, ...cfg }),
+  stopResearch: (accountIds: number[]) =>
+    api.post('/bulk/research/auto/stop', { account_ids: accountIds }),
   status: () => api.get<{ tasks: ResourceTaskStatus[] }>('/bulk/resources/status'),
 };
 

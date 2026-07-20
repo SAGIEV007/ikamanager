@@ -68,6 +68,31 @@ def _upgrade_rank(building: str) -> int:
     return _PRIORITY_RANK.get(building, _DEFAULT_RANK)
 
 
+# Economy-oriented research keywords (pt-br / en). Used to prefer research that
+# boosts resources/storage/economy first when several are available.
+_RESEARCH_PRIORITY: tuple[str, ...] = (
+    "economia",
+    "economy",
+    "comercio",
+    "comercial",
+    "trade",
+    "armazen",
+    "deposito",
+    "storage",
+    "carga",
+    "expedicao",
+    "well",
+    "construcao",
+    "constru",
+    "carpint",
+    "recurso",
+    "resource",
+    "producao",
+    "geometr",
+    "conserv",
+)
+
+
 def serialize_session(gf_token: str, cookies: dict, server_url: str) -> str:
     return json.dumps(
         {"gf_token": gf_token, "cookies": cookies, "server_url": server_url}
@@ -406,6 +431,68 @@ class GameActionService:
                 }
             finally:
                 await session.close()
+
+    async def research_next(self) -> dict:
+        """Start the next research (Level-2 autopilot), best effort.
+
+        Reads the research advisor, skips when a research is already running or
+        nothing is available, otherwise picks an economy-oriented research when
+        possible (falling back to the cheapest available) and starts it. If the
+        research screen cannot be parsed it returns ``skipped`` with the path of
+        the auto-saved page dump so the parser can be refined later.
+        """
+        async with account_locks.get_lock(self.account.id):
+            session = await self._open_session()
+            try:
+                await session.get_action_token()
+                data = await session.get_research()
+
+                if not data.get("parsed"):
+                    dump = data.get("dump", "")
+                    hint = f" (pagina salva em {dump})" if dump else ""
+                    return {
+                        "status": "skipped",
+                        "message": "Nao consegui ler a tela de pesquisa ainda."
+                        + hint,
+                    }
+
+                if data.get("in_progress"):
+                    return {
+                        "status": "skipped",
+                        "message": "Pesquisa ja em andamento.",
+                    }
+
+                options = data.get("options", [])
+                if not options:
+                    return {
+                        "status": "skipped",
+                        "message": "Nenhuma pesquisa disponivel agora.",
+                    }
+
+                target = self._pick_research(options)
+                resp = await session.start_research(target["type"])
+                success = session.action_succeeded(resp)
+                self.account.last_action = datetime.utcnow()
+                await self.db.commit()
+                return {
+                    "status": "success" if success else "failed",
+                    "message": (
+                        f"Pesquisa '{target['name']}' "
+                        + ("iniciada." if success else "falhou.")
+                    ),
+                }
+            finally:
+                await session.close()
+
+    @staticmethod
+    def _pick_research(options: list) -> dict:
+        """Prefer economy-oriented research, then the cheapest available."""
+        def score(opt: dict) -> tuple:
+            name = str(opt.get("name", "")).lower()
+            is_economy = any(k in name for k in _RESEARCH_PRIORITY)
+            return (0 if is_economy else 1, opt.get("cost") or 0)
+
+        return sorted(options, key=score)[0]
 
     async def start_piracy(self, city_id, mission_level: int = 1) -> dict:
         async with account_locks.get_lock(self.account.id):

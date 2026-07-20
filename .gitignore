@@ -10,6 +10,9 @@ venv/
 .venv/
 *.db
 
+# Runtime debug dumps of game screens
+debug_*.html
+
 # Node
 node_modules/
 frontend/dist/

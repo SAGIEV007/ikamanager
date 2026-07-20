@@ -357,6 +357,7 @@ function MultiAccountPanel() {
   const [percent, setPercent] = useState('50');
   const [donateInterval, setDonateInterval] = useState('30');
   const [upgradeInterval, setUpgradeInterval] = useState('20');
+  const [researchInterval, setResearchInterval] = useState('60');
   const [allCities, setAllCities] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
@@ -413,10 +414,28 @@ function MultiAccountPanel() {
     }
   };
 
+  const startResearch = async () => {
+    if (selected.length === 0) return setMsg('Selecione ao menos uma conta.');
+    setMsg('Iniciando pesquisas...');
+    try {
+      const res = await bulkApi.startResearch(selected, {
+        interval_minutes: parseInt(researchInterval || '60', 10),
+        runs: 0,
+      });
+      report(res.data);
+    } catch (e: any) {
+      setMsg(e.response?.data?.detail || 'Falha ao iniciar pesquisas.');
+    }
+  };
+
   const stopAll = async () => {
     if (selected.length === 0) return setMsg('Selecione ao menos uma conta.');
     try {
-      await Promise.all([bulkApi.stopDonate(selected), bulkApi.stopUpgrade(selected)]);
+      await Promise.all([
+        bulkApi.stopDonate(selected),
+        bulkApi.stopUpgrade(selected),
+        bulkApi.stopResearch(selected),
+      ]);
       setMsg('Tarefas paradas nas contas selecionadas.');
     } catch (e: any) {
       setMsg(e.response?.data?.detail || 'Falha ao parar.');
@@ -584,6 +603,36 @@ function MultiAccountPanel() {
                 </p>
               </div>
 
+              {/* Bulk research */}
+              <div className="bg-slate-800/40 rounded-lg p-3">
+                <p className="text-xs font-medium text-fuchsia-300 mb-2">
+                  Pesquisa automática (Academia — todas as selecionadas)
+                </p>
+                <div className="flex items-end gap-2 flex-wrap">
+                  <div>
+                    <label className="block text-[10px] text-slate-500 mb-1">Tentar a cada (min)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={researchInterval}
+                      onChange={(e) => setResearchInterval(e.target.value)}
+                      className="w-20 bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-200"
+                    />
+                  </div>
+                  <button
+                    onClick={startResearch}
+                    className="px-3 py-1.5 rounded bg-fuchsia-700 hover:bg-fuchsia-600 text-white text-xs transition"
+                  >
+                    Iniciar pesquisas
+                  </button>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1">
+                  Prioriza pesquisas de economia/recursos e inicia a próxima quando a Academia estiver livre.
+                  É por conta (não por cidade). Na 1ª vez, se não entender a tela, o programa salva um arquivo
+                  <span className="text-slate-400"> debug_research.html</span> para eu ajustar o leitor.
+                </p>
+              </div>
+
               <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
                 <input
                   type="checkbox"
@@ -621,6 +670,9 @@ function summarizeTask(t: ResourceTaskStatus): string {
   if (t.kind === 'upgrade') {
     const where = cfg.position != null ? `posição ${cfg.position}` : 'escolha inteligente';
     return `${where}${intervalMin ? ` · tenta a cada ~${intervalMin}min` : ''}`;
+  }
+  if (t.kind === 'research') {
+    return `economia primeiro${intervalMin ? ` · tenta a cada ~${intervalMin}min` : ''}`;
   }
   return '';
 }
@@ -696,6 +748,7 @@ function RunningTasksPanel() {
     try {
       if (kind === 'donate') await bulkApi.stopDonate([accountId]);
       else if (kind === 'upgrade') await bulkApi.stopUpgrade([accountId]);
+      else if (kind === 'research') await bulkApi.stopResearch([accountId]);
       await refresh();
     } catch {
       /* ignore */
@@ -704,9 +757,12 @@ function RunningTasksPanel() {
     }
   };
 
-  const active = tasks.filter((t) => t.kind === 'donate' || t.kind === 'upgrade');
+  const active = tasks.filter(
+    (t) => t.kind === 'donate' || t.kind === 'upgrade' || t.kind === 'research'
+  );
   const donateCount = active.filter((t) => t.kind === 'donate' && t.running).length;
   const upgradeCount = active.filter((t) => t.kind === 'upgrade' && t.running).length;
+  const researchCount = active.filter((t) => t.kind === 'research' && t.running).length;
 
   if (active.length === 0) return null;
 
@@ -715,7 +771,7 @@ function RunningTasksPanel() {
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-semibold text-purple-200">Ações em andamento</h2>
         <span className="text-xs text-slate-500">
-          {donateCount} doação(ões) · {upgradeCount} upgrade(s) rodando
+          {donateCount} doação(ões) · {upgradeCount} upgrade(s) · {researchCount} pesquisa(s) rodando
         </span>
       </div>
       <div className="overflow-x-auto">
@@ -747,10 +803,18 @@ function RunningTasksPanel() {
                   <td className="py-2 pr-3">
                     <span
                       className={
-                        t.kind === 'donate' ? 'text-emerald-300' : 'text-sky-300'
+                        t.kind === 'donate'
+                          ? 'text-emerald-300'
+                          : t.kind === 'research'
+                          ? 'text-fuchsia-300'
+                          : 'text-sky-300'
                       }
                     >
-                      {t.kind === 'donate' ? 'Doação' : 'Upgrade'}
+                      {t.kind === 'donate'
+                        ? 'Doação'
+                        : t.kind === 'research'
+                        ? 'Pesquisa'
+                        : 'Upgrade'}
                     </span>
                   </td>
                   <td className="py-2 pr-3 text-slate-400">{summarizeTask(t)}</td>
@@ -1022,6 +1086,9 @@ function CityManager({ accountId }: { accountId: number }) {
 
           {/* Recurring building upgrade */}
           <AutoUpgradePanel accountId={accountId} cityId={city.id} />
+
+          {/* Recurring automatic research (account-wide) */}
+          <AutoResearchPanel accountId={accountId} />
 
           {/* Piracy (only if the city has a pirate fortress) */}
           {city.positions.some((p) => p.building === 'pirateFortress') && (
@@ -1377,6 +1444,94 @@ function AutoUpgradePanel({ accountId, cityId }: { accountId: number; cityId: st
         A cada ciclo escolhe de forma inteligente o próximo edifício a subir — mantém a cidade
         equilibrada priorizando depósito, prefeitura, satisfação e produção. Respeita horário e
         recursos; quando não dá, espera o próximo ciclo.
+      </p>
+      {err && <p className="text-xs text-red-400">{err}</p>}
+      <TaskStatusLine running={running} detail={detail} />
+    </div>
+  );
+}
+
+function AutoResearchPanel({ accountId }: { accountId: number }) {
+  const [interval, setIntervalMin] = useState('60');
+  const [running, setRunning] = useState(false);
+  const [detail, setDetail] = useState<ResourceTaskStatus | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      const res = await accountsApi.autoResearchStatus(accountId);
+      setRunning(res.data.running);
+      setDetail(res.data.detail);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  useEffect(() => {
+    refresh();
+    const t = setInterval(refresh, 5000);
+    return () => clearInterval(t);
+  }, [accountId]);
+
+  const start = async () => {
+    setErr(null);
+    try {
+      await accountsApi.startAutoResearch(accountId, {
+        interval_minutes: parseInt(interval || '60', 10),
+        runs: 0,
+      });
+      await refresh();
+    } catch (e: any) {
+      setErr(e.response?.data?.detail || 'Falha ao iniciar pesquisa automatica.');
+    }
+  };
+
+  const stop = async () => {
+    try {
+      await accountsApi.stopAutoResearch(accountId);
+      await refresh();
+    } catch (e: any) {
+      setErr(e.response?.data?.detail || 'Falha ao parar.');
+    }
+  };
+
+  return (
+    <div className="bg-slate-800/40 rounded-lg p-3">
+      <p className="text-xs font-medium text-fuchsia-300 mb-2">
+        Pesquisa automática (Academia — vale para a conta toda)
+      </p>
+      <div className="flex items-end gap-2 flex-wrap">
+        <div>
+          <label className="block text-[10px] text-slate-500 mb-1">Tentar a cada (min)</label>
+          <input
+            type="number"
+            min={1}
+            value={interval}
+            onChange={(e) => setIntervalMin(e.target.value)}
+            disabled={running}
+            className="w-20 bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-200 disabled:opacity-50"
+          />
+        </div>
+        {running ? (
+          <button
+            onClick={stop}
+            className="px-3 py-1.5 rounded bg-orange-700 hover:bg-orange-600 text-white text-xs transition"
+          >
+            Parar
+          </button>
+        ) : (
+          <button
+            onClick={start}
+            className="px-3 py-1.5 rounded bg-fuchsia-700 hover:bg-fuchsia-600 text-white text-xs transition"
+          >
+            Iniciar
+          </button>
+        )}
+      </div>
+      <p className="text-[10px] text-slate-500 mt-1">
+        Quando a Academia está livre, inicia a próxima pesquisa priorizando economia/recursos.
+        Na 1ª vez, se não entender a tela, salva um arquivo <span className="text-slate-400">debug_research.html</span> na
+        pasta do programa (é só me mandar esse arquivo para eu ajustar o leitor).
       </p>
       {err && <p className="text-xs text-red-400">{err}</p>}
       <TaskStatusLine running={running} detail={detail} />

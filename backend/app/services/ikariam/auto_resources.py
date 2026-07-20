@@ -161,7 +161,7 @@ async def _perform(kind: str, account_id: int, config: dict) -> dict:
             raise GameSessionError("Conta nao encontrada.")
         proxy_url = await resolve_proxy_url(db, account)
         service = GameActionService(account=account, db=db, proxy_url=proxy_url)
-        if config.get("all_cities"):
+        if config.get("all_cities") and kind in ("donate", "upgrade"):
             return await _perform_all_cities(service, kind, config)
         if kind == "donate":
             return await service.donate(
@@ -174,6 +174,10 @@ async def _perform(kind: str, account_id: int, config: dict) -> dict:
             return await service.upgrade_next(
                 config["city_id"], position=config.get("position")
             )
+        if kind == "research":
+            # Research is account-wide (single Academy per account), so it never
+            # iterates cities.
+            return await service.research_next()
         raise ValueError(f"Tipo de tarefa desconhecido: {kind}")
 
 
@@ -396,6 +400,25 @@ def start_upgrade(
             "extra_wait_max": extra_wait_max,
             "runs": runs,
             "all_cities": all_cities,
+            "stagger": stagger,
+        },
+    )
+
+
+def start_research(
+    account_id: int,
+    interval_minutes: int = 60,
+    extra_wait_max: int = 120,
+    runs: int = 0,
+    stagger: bool = False,
+) -> dict:
+    return _start(
+        "research",
+        account_id,
+        {
+            "interval_s": int(interval_minutes) * 60,
+            "extra_wait_max": extra_wait_max,
+            "runs": runs,
             "stagger": stagger,
         },
     )
