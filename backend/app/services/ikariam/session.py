@@ -366,33 +366,68 @@ class IkariamSession:
              "options": [{"type": str, "name": str, "cost": int}],
              "dump": str}
         """
-        html = await self._get_ajax(
-            "view=researchAdvisor&backgroundView=researchAdvisor"
-            f"&actionRequest={self.action_token or 'REQUESTID'}&ajax=1"
-        )
-        if self._is_expired(html):
-            raise GameSessionError("Sessao do jogo expirada. Faca login novamente.")
-        if not self._looks_like_research(html):
-            plain = await self._get("view=researchAdvisor")
-            if self._is_expired(plain):
+        # Try, in order, the request forms that actually carry the research
+        # tree. The plain AJAX header refresh does NOT contain it (it only has
+        # the top bar / advisor menu links), so we must load the advisor view
+        # itself and, failing that, the full page whose inline script embeds
+        # the tree.
+        attempts: list[str] = []
+        for html in (
+            await self._get_ajax("view=researchAdvisor&ajax=1"),
+            await self._get("view=researchAdvisor"),
+        ):
+            if self._is_expired(html):
                 raise GameSessionError(
                     "Sessao do jogo expirada. Faca login novamente."
                 )
-            if self._looks_like_research(plain):
-                html = plain
-        return self._parse_research(html)
+            attempts.append(html)
+            if self._has_research_tree(html):
+                return self._parse_research(html)
 
-    def _looks_like_research(self, html: str) -> bool:
-        return bool(
-            re.search(r"js_ResearchGraphViewData|researchType|researchAdvisor", html)
-        )
+        # None carried the tree: parse the richest response (may still work via
+        # tolerant patterns) and, if it doesn't, dump it for later refinement.
+        best = max(attempts, key=len) if attempts else ""
+        return self._parse_research(best)
+
+    def _has_research_tree(self, html: str) -> bool:
+        """Only trust a response that carries the actual research tree, not the
+        advisor menu link that appears in every page header."""
+        text = self._research_search_text(html)
+        return "js_ResearchGraphViewData" in text or "researchType" in text
+
+    def _research_search_text(self, html: str) -> str:
+        """Return searchable text. AJAX responses are JSON arrays whose HTML
+        template is escaped inside a string; flatten every string value so the
+        embedded tree becomes searchable too."""
+        stripped = html.lstrip()
+        if not stripped.startswith("["):
+            return html
+        try:
+            arr = json.loads(html, strict=False)
+        except json.JSONDecodeError:
+            return html
+        parts: list[str] = [html]
+
+        def collect(node: object) -> None:
+            if isinstance(node, str):
+                parts.append(node)
+            elif isinstance(node, list):
+                for item in node:
+                    collect(item)
+            elif isinstance(node, dict):
+                for value in node.values():
+                    collect(value)
+
+        collect(arr)
+        return "\n".join(parts)
 
     def _parse_research(self, html: str) -> dict:
         """Try to extract research nodes. Falls back to dumping the page."""
         data: object = None
+        text = self._research_search_text(html)
 
         blob = re.search(
-            r"js_ResearchGraphViewData\s*=\s*JSON\.parse\(\s*'(.+?)'\s*\)", html
+            r"js_ResearchGraphViewData\s*=\s*JSON\.parse\(\s*'(.+?)'\s*\)", text
         )
         if blob:
             raw = blob.group(1).encode().decode("unicode_escape")
@@ -403,7 +438,7 @@ class IkariamSession:
 
         if data is None:
             bg = re.search(
-                r'"updateBackgroundData",\s?([\s\S]*?)\],\["updateTemplateData"', html
+                r'"updateBackgroundData",\s?([\s\S]*?)\],\["updateTemplateData"', text
             )
             if bg:
                 try:
